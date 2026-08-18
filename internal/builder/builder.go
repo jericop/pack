@@ -468,7 +468,8 @@ func (b *Builder) Save(logger logging.Logger, creatorMetadata CreatorMetadata, a
 		return fmt.Errorf("failed to save builder %s as saving is not allowed", b.Name())
 	}
 
-	logger.Debugf("Creating builder with the following buildpacks:")
+	logger.Debugf("Builder creation completed, starting image save")
+	logger.Debugf("Builder contains the following buildpacks:")
 	for _, bpInfo := range b.metadata.Buildpacks {
 		logger.Debugf("-> %s", style.Symbol(bpInfo.FullName()))
 	}

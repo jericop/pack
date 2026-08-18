@@ -34,6 +34,7 @@ type BuildFlags struct {
 	Interactive            bool
 	Sparse                 bool
 	EnableUsernsHost       bool
+	Buildkit               bool
 	DockerHost             string
 	CacheImage             string
 	Cache                  cache.CacheOpts
@@ -43,6 +44,12 @@ type BuildFlags struct {
 	Registry               string
 	RunImage               string
 	Platform               string
+	Platforms              string
+	BuildBackend           string
+	BuildkitBuilder        string
+	BuildkitCacheFrom      []string
+	BuildkitCacheTo        []string
+	ExistingTagPolicy      string
 	Policy                 string
 	Network                string
 	DescriptorPath         string
@@ -186,6 +193,13 @@ func Build(logger logging.Logger, cfg config.Config, packClient PackClient) *cob
 				Publish:           flags.Publish,
 				DockerHost:        flags.DockerHost,
 				Platform:          flags.Platform,
+				Platforms:         flags.Platforms,
+				Buildkit:          flags.Buildkit,
+				BuildBackend:      flags.BuildBackend,
+				BuildkitBuilder:   flags.BuildkitBuilder,
+				BuildkitCacheFrom: flags.BuildkitCacheFrom,
+				BuildkitCacheTo:   flags.BuildkitCacheTo,
+				ExistingTagPolicy: flags.ExistingTagPolicy,
 				PullPolicy:        pullPolicy,
 				ClearCache:        flags.ClearCache,
 				TrustBuilder: func(string) bool {
@@ -286,6 +300,13 @@ This option may set DOCKER_HOST environment variable for the build container if 
 `)
 	cmd.Flags().StringVar(&buildFlags.LifecycleImage, "lifecycle-image", cfg.LifecycleImage, `Custom lifecycle image to use for analysis, restore, and export when builder is untrusted.`)
 	cmd.Flags().StringVar(&buildFlags.Platform, "platform", "", `Platform to build on (e.g., "linux/amd64").`)
+	cmd.Flags().StringVar(&buildFlags.Platforms, "platforms", "", `Comma-separated list of target platforms for multi-architecture builds (e.g., "linux/amd64,linux/arm64"). Requires --buildkit. Requires --publish or produces local OCI layouts.`)
+	cmd.Flags().BoolVar(&buildFlags.Buildkit, "buildkit", false, `[experimental] Use BuildKit backend for building. Required for multi-platform builds.`)
+	cmd.Flags().StringVar(&buildFlags.BuildBackend, "build-backend", "", `Build backend for multi-platform builds. Values: "buildkit-dockerfile" (default), "buildkit-llb".`)
+	cmd.Flags().StringVar(&buildFlags.BuildkitBuilder, "buildkit-builder", "", `Name of the buildx builder to use for multi-platform builds (default: current buildx default).`)
+	cmd.Flags().StringArrayVar(&buildFlags.BuildkitCacheFrom, "buildkit-cache-from", nil, `External cache source for buildkit (e.g., "type=registry,ref=myapp-cache:latest").`)
+	cmd.Flags().StringArrayVar(&buildFlags.BuildkitCacheTo, "buildkit-cache-to", nil, `External cache destination for buildkit (e.g., "type=registry,ref=myapp-cache:latest,mode=max").`)
+	cmd.Flags().StringVar(&buildFlags.ExistingTagPolicy, "existing-tag-policy", "warn", `Policy when target tag already exists in registry during buildkit builds. Values: "overwrite", "fail", "warn" (default).`)
 	cmd.Flags().StringVar(&buildFlags.Policy, "pull-policy", "", `Pull policy to use. Accepted values are always, never, and if-not-present. (default "always")`)
 	cmd.Flags().StringVar(&buildFlags.ExecutionEnv, "exec-env", "production", `Execution environment to use. (default "production"`)
 	cmd.Flags().StringVarP(&buildFlags.Registry, "buildpack-registry", "r", cfg.DefaultRegistryName, "Buildpack Registry by name")
@@ -357,6 +378,14 @@ func validateBuildFlags(flags *BuildFlags, cfg config.Config, inputImageRef clie
 		if ok := executionEnvRegex.MatchString(flags.ExecutionEnv); !ok {
 			return errors.New("exec-env MUST only contain numbers, letters, and the characters: . or -")
 		}
+	}
+
+	if flags.Platforms != "" && flags.Platform != "" {
+		return errors.New("--platforms and --platform are mutually exclusive; use --platforms for multi-architecture builds")
+	}
+
+	if flags.Platforms != "" && !flags.Buildkit {
+		return errors.New("--platforms requires --buildkit flag (experimental feature)")
 	}
 
 	return nil

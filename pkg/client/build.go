@@ -30,6 +30,7 @@ import (
 
 	"github.com/buildpacks/pack/buildpackage"
 	"github.com/buildpacks/pack/internal/build"
+	"github.com/buildpacks/pack/internal/build/multiplatform"
 	"github.com/buildpacks/pack/internal/builder"
 	internalConfig "github.com/buildpacks/pack/internal/config"
 	"github.com/buildpacks/pack/internal/layer"
@@ -172,6 +173,37 @@ type BuildOptions struct {
 
 	// Platform is the desired platform to build on (e.g., linux/amd64)
 	Platform string
+
+	// Platforms specifies multiple target platforms for multi-architecture builds
+	// (e.g., "linux/amd64,linux/arm64"). When set, the build uses BuildKit to produce
+	// per-architecture images and assembles them into a manifest list.
+	// Requires --buildkit flag to be set. Requires --publish or an output directory.
+	// Mutually exclusive with Platform.
+	Platforms string
+
+	// Buildkit enables the BuildKit execution backend. This is required for multi-platform
+	// builds and can also be used for single-platform builds to take advantage of BuildKit
+	// caching and features. This is an experimental feature.
+	Buildkit bool
+
+	// BuildBackend specifies which multi-platform build backend to use.
+	// Valid values: "auto" (default), "buildkit-dockerfile", "buildkit-llb".
+	// Can also be set via PACK_BUILD_BACKEND environment variable.
+	BuildBackend string
+
+	// BuildkitBuilder specifies the name of the buildx builder to use for multi-platform builds.
+	// If empty, the default builder is used.
+	BuildkitBuilder string
+
+	// BuildkitCacheFrom specifies external cache sources for buildkit (e.g., "type=registry,ref=...").
+	BuildkitCacheFrom []string
+
+	// BuildkitCacheTo specifies external cache destinations for buildkit.
+	BuildkitCacheTo []string
+
+	// ExistingTagPolicy controls behavior when the target tag already exists in the registry
+	// during a buildkit multi-platform build. Values: "overwrite", "fail", "warn" (default).
+	ExistingTagPolicy string
 
 	// Strategy for updating local images before a build.
 	PullPolicy image.PullPolicy
@@ -831,10 +863,288 @@ func (c *Client) Build(ctx context.Context, opts BuildOptions) error {
 		return ephemeralRunImageName, nil
 	}
 
+	// Multi-platform build routing: if --buildkit is enabled, use the buildkit executor.
+	// --platforms requires --buildkit to be set explicitly.
+	if opts.Buildkit {
+		if opts.Platforms == "" {
+			// Single-platform buildkit build — use the current platform
+			opts.Platforms = opts.Platform
+			if opts.Platforms == "" {
+				// Default to the builder's platform
+				if targetToUse != nil {
+					opts.Platforms = targetToUse.OS + "/" + targetToUse.Arch
+				} else {
+					opts.Platforms = "linux/amd64"
+				}
+			}
+		}
+		return c.buildMultiPlatform(ctx, opts, lifecycleOpts, appPath, runImageName)
+	}
+
+	if opts.Platforms != "" {
+		return fmt.Errorf("--platforms requires --buildkit flag to be set (experimental feature)")
+	}
+
 	if err = c.lifecycleExecutor.Execute(ctx, lifecycleOpts); err != nil {
 		return fmt.Errorf("executing lifecycle: %w", err)
 	}
 	return c.logImageNameAndSha(ctx, opts.Publish, imageRef, opts.InsecureRegistries)
+}
+
+// buildMultiPlatform handles the multi-platform build path using BuildKit.
+// It constructs lifecycle phase commands, selects the appropriate backend,
+// and dispatches the build to the multi-platform executor.
+func (c *Client) buildMultiPlatform(ctx context.Context, opts BuildOptions, lifecycleOpts build.LifecycleOptions, appPath string, runImageName string) error {
+	platforms, err := multiplatform.ParsePlatforms(opts.Platforms)
+	if err != nil {
+		return fmt.Errorf("parsing platforms: %w", err)
+	}
+
+	// Multi-platform builds require --publish (can't load multi-arch manifest to local daemon)
+	if !opts.Publish {
+		c.logger.Info("Multi-platform build without --publish: images will be built but not pushed. Use --publish to create a manifest list.")
+	}
+
+	// The Dockerfile references the original remote builder image (not pack.local/).
+	// Always extract and inject the builder's order into the Dockerfile to ensure
+	// consistent detection behavior across platforms.
+	var orderToml string
+	orderLabel, err := lifecycleOpts.Builder.Image().Label("io.buildpacks.buildpack.order")
+	if err == nil && orderLabel != "" {
+		orderToml = convertOrderJSONToTOML(orderLabel)
+		c.logger.Debugf("Injecting buildpack order into Dockerfile")
+	}
+
+	// Construct the lifecycle phase commands from the lifecycle options
+	phases := buildLifecyclePhases(lifecycleOpts, runImageName, c.logger.IsVerbose())
+
+	// Generate a cache ID based on the image name
+	cacheID := fmt.Sprintf("pack-cache-%s", sanitizeCacheID(lifecycleOpts.Image.Name()))
+
+	// Resolve docker config path for registry auth
+	dockerConfigPath := resolveDockerConfigPath()
+
+	// Build the platform options (shared across all architectures)
+	platformBuildOpts := multiplatform.PlatformBuildOpts{
+		BuilderImage:     lifecycleOpts.BuilderImage,
+		LifecycleImage:   lifecycleOpts.LifecycleImage,
+		RunImage:         runImageName,
+		AppPath:          appPath,
+		Phases:           phases,
+		CacheID:          cacheID,
+		ImageName:        lifecycleOpts.Image.Name(),
+		Publish:          opts.Publish,
+		DockerConfigPath: dockerConfigPath,
+		BuilderUID:       lifecycleOpts.Builder.UID(),
+		BuilderGID:       lifecycleOpts.Builder.GID(),
+		PlatformAPI:      negotiatePlatformAPI(lifecycleOpts),
+		FileFilter:       nil,
+		Network:          opts.ContainerConfig.Network,
+		BuildpackImages:  resolveBuildpackImages(opts),
+		OrderToml:        orderToml,
+		ClearCache:       opts.ClearCache,
+	}
+
+	// Create the backend
+	buildkitOpts := multiplatform.BuildkitOpts{
+		Builder:   opts.BuildkitBuilder,
+		CacheFrom: opts.BuildkitCacheFrom,
+		CacheTo:   opts.BuildkitCacheTo,
+	}
+
+	backend, err := multiplatform.NewBackend(ctx, multiplatform.BackendType(opts.BuildBackend), c.logger, buildkitOpts)
+	if err != nil {
+		return fmt.Errorf("initializing build backend: %w", err)
+	}
+
+	// Create and run the multi-platform executor
+	executor := multiplatform.NewExecutor(backend, c.logger)
+
+	multiOpts := multiplatform.MultiPlatformBuildOpts{
+		Platforms:         platforms,
+		BuildOpts:         platformBuildOpts,
+		BuildkitOpts:      buildkitOpts,
+		Logger:            c.logger,
+		ManifestListName:  lifecycleOpts.Image.Name(),
+		Publish:           opts.Publish,
+		ExistingTagPolicy: multiplatform.ExistingTagPolicy(opts.ExistingTagPolicy),
+	}
+
+	results, err := executor.Execute(ctx, multiOpts)
+	if err != nil {
+		return fmt.Errorf("multi-platform build: %w", err)
+	}
+
+	c.logger.Infof("Successfully built %d platform image(s)", len(results))
+	for _, r := range results {
+		c.logger.Infof("  %s: %s", r.Platform.String(), r.ImageRef)
+	}
+
+	return nil
+}
+
+// buildLifecyclePhases constructs the ordered list of lifecycle phase commands
+// from the lifecycle options. This translates the same logic used by LifecycleExecution
+// to determine phase arguments into PhaseCommand structs for the multi-platform executor.
+func buildLifecyclePhases(opts build.LifecycleOptions, runImage string, verbose bool) []multiplatform.PhaseCommand {
+	imageName := opts.Image.Name()
+
+	// Only add -log-level debug when the user passed --verbose
+	var logArgs []string
+	if verbose {
+		logArgs = []string{"-log-level", "debug"}
+	}
+
+	analyzerArgs := append(logArgs, "-run-image", runImage, imageName)
+	detectorArgs := append(logArgs, "-app", "/workspace")
+	restorerArgs := append(logArgs, "-cache-dir", "/cache")
+	builderArgs := append(logArgs, "-app", "/workspace")
+	exporterArgs := append(logArgs, "-app", "/workspace", "-cache-dir", "/cache", imageName)
+
+	phases := []multiplatform.PhaseCommand{
+		{
+			Name:              "analyzer",
+			Binary:            "/cnb/lifecycle/analyzer",
+			Args:              analyzerArgs,
+			NeedsRegistryAuth: true,
+			NeedsCache:        false,
+		},
+		{
+			Name:   "detector",
+			Binary: "/cnb/lifecycle/detector",
+			Args:   detectorArgs,
+		},
+		{
+			Name:       "restorer",
+			Binary:     "/cnb/lifecycle/restorer",
+			Args:       restorerArgs,
+			NeedsCache: true,
+		},
+		{
+			Name:   "builder",
+			Binary: "/cnb/lifecycle/builder",
+			Args:   builderArgs,
+		},
+		{
+			Name:              "exporter",
+			Binary:            "/cnb/lifecycle/exporter",
+			Args:              exporterArgs,
+			NeedsRegistryAuth: true,
+			NeedsCache:        true,
+		},
+	}
+
+	return phases
+}
+
+// sanitizeCacheID creates a filesystem/buildkit-safe cache identifier from an image name.
+func sanitizeCacheID(imageName string) string {
+	// Replace characters that aren't valid in buildkit cache IDs
+	replacer := strings.NewReplacer("/", "_", ":", "_", ".", "-")
+	return replacer.Replace(imageName)
+}
+
+// resolveDockerConfigPath returns the path to the Docker config.json file.
+func resolveDockerConfigPath() string {
+	// Check DOCKER_CONFIG env var first
+	if configDir := os.Getenv("DOCKER_CONFIG"); configDir != "" {
+		return filepath.Join(configDir, "config.json")
+	}
+	// Default location
+	homeDir, err := os.UserHomeDir()
+	if err != nil {
+		return ""
+	}
+	configPath := filepath.Join(homeDir, ".docker", "config.json")
+	if _, err := os.Stat(configPath); err == nil {
+		return configPath
+	}
+	return ""
+}
+
+// negotiatePlatformAPI finds the latest platform API supported by both pack and the builder's lifecycle.
+func negotiatePlatformAPI(opts build.LifecycleOptions) string {
+	builderAPIs := append(
+		opts.Builder.LifecycleDescriptor().APIs.Platform.Deprecated,
+		opts.Builder.LifecycleDescriptor().APIs.Platform.Supported...,
+	)
+	// Find the highest platform API version supported by both pack and the builder
+	for i := len(build.SupportedPlatformAPIVersions) - 1; i >= 0; i-- {
+		for _, builderAPI := range builderAPIs {
+			if build.SupportedPlatformAPIVersions[i].Compare(builderAPI) == 0 {
+				return build.SupportedPlatformAPIVersions[i].String()
+			}
+		}
+	}
+	// Fallback to the latest pack supports (will likely fail at runtime with a clear error)
+	return build.SupportedPlatformAPIVersions[len(build.SupportedPlatformAPIVersions)-1].String()
+}
+
+// resolveBuildpackImages extracts image references from the user-provided buildpack strings.
+// Only image-style references (not local paths or URIs) are included, as those are the ones
+// that can be referenced in a Dockerfile FROM instruction.
+func resolveBuildpackImages(opts BuildOptions) []string {
+	var images []string
+	allBPs := append(opts.PreBuildpacks, opts.Buildpacks...)
+	allBPs = append(allBPs, opts.PostBuildpacks...)
+
+	for _, bp := range allBPs {
+		// Skip local paths and URIs — only include image references
+		// Image references look like "docker.io/paketo-buildpacks/go" or "paketo-buildpacks/go:4.19"
+		// Local paths contain "/" at the start or "." or end in ".tar"/".tgz"
+		if bp == "" {
+			continue
+		}
+		if strings.HasPrefix(bp, ".") || strings.HasPrefix(bp, "/") {
+			continue
+		}
+		if strings.HasSuffix(bp, ".tar") || strings.HasSuffix(bp, ".tgz") || strings.HasSuffix(bp, ".tar.gz") {
+			continue
+		}
+		// If it contains "://" it's a URI, not an image reference
+		if strings.Contains(bp, "://") {
+			continue
+		}
+		// Registry URNs like "urn:cnb:registry:paketo-buildpacks/go" are not image refs
+		if strings.HasPrefix(bp, "urn:") {
+			continue
+		}
+		images = append(images, bp)
+	}
+	return images
+}
+
+// convertOrderJSONToTOML converts the builder's order label (JSON) to TOML format
+// for writing to /cnb/order.toml in the Dockerfile.
+func convertOrderJSONToTOML(orderJSON string) string {
+	type groupEntry struct {
+		ID       string `json:"id"`
+		Version  string `json:"version"`
+		Optional bool   `json:"optional,omitempty"`
+	}
+	type orderEntry struct {
+		Group []groupEntry `json:"group"`
+	}
+
+	var order []orderEntry
+	if err := json.Unmarshal([]byte(orderJSON), &order); err != nil {
+		return ""
+	}
+
+	var b strings.Builder
+	for _, entry := range order {
+		b.WriteString("[[order]]\n")
+		for _, g := range entry.Group {
+			b.WriteString("  [[order.group]]\n")
+			b.WriteString(fmt.Sprintf("    id = %q\n", g.ID))
+			b.WriteString(fmt.Sprintf("    version = %q\n", g.Version))
+			if g.Optional {
+				b.WriteString("    optional = true\n")
+			}
+		}
+		b.WriteString("\n")
+	}
+	return b.String()
 }
 
 func usesContainerdStorage(docker DockerClient) bool {
