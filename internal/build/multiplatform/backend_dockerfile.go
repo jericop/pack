@@ -158,18 +158,15 @@ func (b *DockerfileBackend) buildBuildxArgs(opts PlatformBuildOpts, dockerfilePa
 	args = append(args, "-f", dockerfilePath)
 
 	// Image naming and output
-	// The lifecycle exporter pushes the final app image directly to the registry.
-	// Buildkit is used purely as an execution engine — we don't want it to produce
-	// its own output image (which would overwrite the lifecycle's properly-labeled image).
-	if opts.Publish {
-		// No --tag or --push: lifecycle exporter handles the push.
-		// Use --output type=cacheonly to run the build but discard buildkit's output.
+	if opts.ExportMode == ExportOCILayout && opts.OutputDir != "" {
+		// OCI layout mode: extract the /output directory from the build container.
+		// Multi-platform builds with type=local create per-platform subdirectories.
+		args = append(args, "--output", fmt.Sprintf("type=local,dest=%s", opts.OutputDir))
+	} else if opts.Publish {
+		// Registry mode: lifecycle pushes per-arch images directly.
+		// Buildkit output is discarded.
 		args = append(args, "--output", "type=cacheonly")
-	} else if opts.OutputDir != "" {
-		// Output as OCI layout to local directory
-		args = append(args, "--output", fmt.Sprintf("type=oci,dest=%s/image.tar", opts.OutputDir))
 	} else {
-		// No publish, no output dir: just run the build (useful for testing)
 		args = append(args, "--output", "type=cacheonly")
 	}
 

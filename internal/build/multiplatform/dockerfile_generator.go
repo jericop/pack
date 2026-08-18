@@ -209,13 +209,16 @@ func GenerateDockerfileMultiPlatform(opts PlatformBuildOpts) string {
 	b.WriteString("\n")
 
 	// Set up directories and permissions
-	b.WriteString("RUN mkdir -p /cache && chown -R ")
+	b.WriteString("RUN mkdir -p /cache /output && chown -R ")
 	b.WriteString(fmt.Sprintf("%d:%d", opts.BuilderUID, opts.BuilderGID))
-	b.WriteString(" /cache\n")
+	b.WriteString(" /cache /output\n")
 	b.WriteString("\n")
 
 	// Set environment variables
 	b.WriteString(fmt.Sprintf("ENV CNB_PLATFORM_API=%s\n", opts.PlatformAPI))
+	if opts.ExportMode == ExportOCILayout {
+		b.WriteString("ENV CNB_EXPERIMENTAL_MODE=warn\n")
+	}
 	b.WriteString("\n")
 
 	// Switch to CNB user for app copy and lifecycle execution
@@ -262,8 +265,14 @@ func generateLifecycleRunMultiPlatform(opts PlatformBuildOpts) string {
 				mounts = append(mounts, cacheMount)
 			}
 		}
+		// In OCI layout mode, only the exporter doesn't need registry access
+		// (it writes to local disk). The analyzer still needs it to read the run image.
 		if phase.NeedsRegistryAuth {
-			mounts = append(mounts, secretMount)
+			if opts.ExportMode == ExportOCILayout && phase.Name == "exporter" {
+				// Exporter in OCI layout mode writes locally, no creds needed
+			} else {
+				mounts = append(mounts, secretMount)
+			}
 		}
 
 		// Build the command, substituting image name with per-arch tag where needed
@@ -272,11 +281,19 @@ func generateLifecycleRunMultiPlatform(opts PlatformBuildOpts) string {
 		if opts.ClearCache {
 			args = removeCacheArgs(args)
 		}
-		for i, arg := range args {
-			if arg == opts.ImageName {
-				args[i] = opts.ImageName + "-${TARGETARCH}"
+
+		// In OCI layout mode, modify analyzer and exporter to use -layout -layout-dir
+		if opts.ExportMode == ExportOCILayout {
+			args = convertToOCILayoutArgs(args, phase.Name, opts.ImageName)
+		} else {
+			// Registry mode: use per-arch tag so parallel builds don't overwrite each other
+			for i, arg := range args {
+				if arg == opts.ImageName {
+					args[i] = opts.ImageName + "-${TARGETARCH}"
+				}
 			}
 		}
+
 		cmd := strings.Join(args, " ")
 
 		// Write the RUN instruction
@@ -320,4 +337,41 @@ func removeCacheArgs(args []string) []string {
 		result = append(result, args[i])
 	}
 	return result
+}
+
+// layoutPath converts an image reference to the path format used by OCI layout directories.
+// e.g., "docker.io/paketobuildpacks/run:latest" → "docker.io/paketobuildpacks/run/latest"
+func layoutPath(imageRef string) string {
+	// Replace the tag separator : with / for the layout path
+	// registry/repo:tag → registry/repo/tag
+	parts := strings.SplitN(imageRef, ":", 2)
+	if len(parts) == 2 {
+		return parts[0] + "/" + parts[1]
+	}
+	return imageRef + "/latest"
+}
+
+// convertToOCILayoutArgs modifies lifecycle phase args for OCI layout export mode.
+// The analyzer gets -layout -layout-dir /output to write the run image reference in layout format.
+// The exporter gets -layout -layout-dir /output to write the final image as OCI layout.
+// A pre-pull step is added in the Dockerfile to fetch the run image into the layout dir.
+func convertToOCILayoutArgs(args []string, phaseName string, imageName string) []string {
+	switch phaseName {
+	case "analyzer":
+		// Insert -layout -layout-dir /output after the binary name
+		var result []string
+		result = append(result, args[0]) // binary
+		result = append(result, "-layout", "-layout-dir", "/output")
+		result = append(result, args[1:]...)
+		return result
+	case "exporter":
+		// Insert -layout -layout-dir /output after the binary name
+		var result []string
+		result = append(result, args[0]) // binary
+		result = append(result, "-layout", "-layout-dir", "/output")
+		result = append(result, args[1:]...)
+		return result
+	default:
+		return args
+	}
 }

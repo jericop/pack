@@ -201,9 +201,11 @@ type BuildOptions struct {
 	// BuildkitCacheTo specifies external cache destinations for buildkit.
 	BuildkitCacheTo []string
 
-	// ExistingTagPolicy controls behavior when the target tag already exists in the registry
-	// during a buildkit multi-platform build. Values: "overwrite", "fail", "warn" (default).
-	ExistingTagPolicy string
+
+	// BuildkitExportMode controls how per-arch images are exported from buildkit.
+	// Values: "registry" (default) — lifecycle pushes per-arch tags to registry;
+	//         "oci-layout" — lifecycle exports to OCI layout on disk, pack assembles and pushes atomically.
+	BuildkitExportMode string
 
 	// Strategy for updating local images before a build.
 	PullPolicy image.PullPolicy
@@ -943,6 +945,7 @@ func (c *Client) buildMultiPlatform(ctx context.Context, opts BuildOptions, life
 		BuildpackImages:  resolveBuildpackImages(opts),
 		OrderToml:        orderToml,
 		ClearCache:       opts.ClearCache,
+		ExportMode:       multiplatform.ExportMode(opts.BuildkitExportMode),
 	}
 
 	// Create the backend
@@ -967,7 +970,7 @@ func (c *Client) buildMultiPlatform(ctx context.Context, opts BuildOptions, life
 		Logger:            c.logger,
 		ManifestListName:  lifecycleOpts.Image.Name(),
 		Publish:           opts.Publish,
-		ExistingTagPolicy: multiplatform.ExistingTagPolicy(opts.ExistingTagPolicy),
+		ExportMode:        multiplatform.ExportMode(opts.BuildkitExportMode),
 	}
 
 	results, err := executor.Execute(ctx, multiOpts)

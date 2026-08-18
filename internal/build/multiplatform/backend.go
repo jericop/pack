@@ -165,6 +165,9 @@ type PlatformBuildOpts struct {
 	// ClearCache when true disables all caching: buildkit layer cache (--no-cache)
 	// and lifecycle buildpack cache (skip the cache mount).
 	ClearCache bool
+
+	// ExportMode controls whether the lifecycle pushes to a registry or writes OCI layout to disk.
+	ExportMode ExportMode
 }
 
 // PlatformBuildResult describes the outcome of building for a single platform.
@@ -244,24 +247,22 @@ type MultiPlatformBuildOpts struct {
 	// Publish indicates whether to push the final manifest list to a registry.
 	Publish bool
 
-	// ExistingTagPolicy controls behavior when the target tag already exists in the registry.
-	// Valid values:
-	//   "overwrite" (default) - overwrite the existing tag
-	//   "fail"               - fail the build if the tag already exists
-	//   "warn"               - warn but continue (overwrite)
-	ExistingTagPolicy ExistingTagPolicy
+
+	// ExportMode controls how per-arch images are produced.
+	// "registry" (default): lifecycle pushes per-arch images to registry tags, then manifest list is assembled.
+	// "oci-layout": lifecycle exports to OCI layout on disk, pack assembles and pushes atomically (no temp tags).
+	ExportMode ExportMode
 }
 
-// ExistingTagPolicy defines how to handle an existing image at the target tag.
-type ExistingTagPolicy string
+// ExportMode defines how per-arch images are exported from buildkit.
+type ExportMode string
 
 const (
-	// ExistingTagOverwrite overwrites the existing tag without warning.
-	ExistingTagOverwrite ExistingTagPolicy = "overwrite"
+	// ExportRegistry has the lifecycle push per-arch images to registry tags during the build.
+	ExportRegistry ExportMode = "registry"
 
-	// ExistingTagFail fails the build if the tag already exists.
-	ExistingTagFail ExistingTagPolicy = "fail"
-
-	// ExistingTagWarn warns that the tag will be overwritten but continues.
-	ExistingTagWarn ExistingTagPolicy = "warn"
+	// ExportOCILayout has the lifecycle export to OCI layout on disk, then pack assembles
+	// the manifest list and pushes atomically using go-containerregistry.
+	ExportOCILayout ExportMode = "oci-layout"
 )
+

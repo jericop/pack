@@ -3,7 +3,7 @@ package multiplatform
 import (
 	"context"
 	"fmt"
-	"strings"
+	"os"
 
 	"github.com/buildpacks/pack/internal/style"
 	"github.com/buildpacks/pack/pkg/logging"
@@ -43,34 +43,20 @@ func (e *Executor) Execute(ctx context.Context, opts MultiPlatformBuildOpts) ([]
 		e.logger.Infof("  - %s", p.String())
 	}
 
-	// Check if the target tag already exists and enforce the existing tag policy
-	var previousDigest string
-	if opts.Publish && opts.ManifestListName != "" {
-		var err error
-		previousDigest, err = e.checkExistingTag(ctx, opts)
-		if err != nil {
-			return nil, err
-		}
-	}
-
 	results, err := e.buildAllPlatforms(ctx, opts)
 	if err != nil {
-		// If the build failed and we had a previous image, log it for manual recovery
-		if previousDigest != "" {
-			e.logger.Warnf("Build failed. The previous image at %s had digest %s",
-				style.Symbol(opts.ManifestListName), previousDigest)
-			e.logger.Warnf("To restore it: docker buildx imagetools create --tag %s %s@%s",
-				opts.ManifestListName, opts.ManifestListName, previousDigest)
-		}
 		return nil, err
 	}
 
-	// The lifecycle exporter pushes per-arch images to arch-suffixed tags.
-	// We assemble the manifest list from those tags, then clean up the temp tags.
+	// Assemble and push the manifest list
 	if opts.Publish && opts.ManifestListName != "" {
 		e.logger.Info(style.Step("ASSEMBLING MANIFEST LIST"))
 
-		// Build per-arch tag references
+		if opts.ExportMode == ExportOCILayout {
+			return nil, fmt.Errorf("oci-layout export mode is not yet fully implemented; use --buildkit-export-mode=registry")
+		}
+
+		// Registry mode: assemble from per-arch tags using imagetools
 		perArchRefs := make([]PlatformBuildResult, len(opts.Platforms))
 		for i, p := range opts.Platforms {
 			perArchRefs[i] = PlatformBuildResult{
@@ -80,81 +66,31 @@ func (e *Executor) Execute(ctx context.Context, opts MultiPlatformBuildOpts) ([]
 		}
 
 		if err := assembleManifestListViaDocker(ctx, opts.ManifestListName, perArchRefs, e.logger); err != nil {
-			if previousDigest != "" {
-				e.logger.Warnf("Manifest list assembly failed. Previous image digest: %s", previousDigest)
-				e.logger.Warnf("To restore: docker buildx imagetools create --tag %s %s@%s",
-					opts.ManifestListName, opts.ManifestListName, previousDigest)
-			}
 			return nil, fmt.Errorf("assembling manifest list: %w", err)
 		}
+
 		e.logger.Infof("Successfully created manifest list %s", style.Symbol(opts.ManifestListName))
-
-		// Clean up per-arch tags (best effort — don't fail the build if cleanup fails)
-		for _, ref := range perArchRefs {
-			e.logger.Debugf("Cleaning up intermediate tag: %s", ref.ImageRef)
-			// Note: most registries don't support tag deletion via docker CLI.
-			// The tags will expire naturally (e.g., ttl.sh) or can be cleaned up
-			// by registry garbage collection policies.
-		}
-
-		if previousDigest != "" {
-			e.logger.Debugf("Previous image digest was: %s", previousDigest)
-		}
 	}
 
 	return results, nil
-}
-
-// checkExistingTag verifies whether the target tag already exists and enforces the policy.
-// Returns the existing digest (if any) for recovery purposes.
-func (e *Executor) checkExistingTag(ctx context.Context, opts MultiPlatformBuildOpts) (string, error) {
-	// Query the registry for the existing digest at this tag
-	digest, err := getRemoteDigest(ctx, opts.ManifestListName, e.logger)
-	if err != nil || digest == "" {
-		// Tag doesn't exist or can't be reached — proceed normally
-		return "", nil
-	}
-
-	policy := opts.ExistingTagPolicy
-	if policy == "" {
-		policy = ExistingTagWarn // default to warn
-	}
-
-	switch policy {
-	case ExistingTagFail:
-		return digest, fmt.Errorf(
-			"tag %s already exists (digest: %s); use --existing-tag-policy=overwrite to replace it",
-			style.Symbol(opts.ManifestListName), digest)
-	case ExistingTagWarn:
-		e.logger.Warnf("Tag %s already exists (digest: %s) and will be overwritten",
-			style.Symbol(opts.ManifestListName), digest)
-	case ExistingTagOverwrite:
-		e.logger.Debugf("Tag %s exists (digest: %s), overwriting as requested",
-			opts.ManifestListName, digest)
-	}
-
-	return digest, nil
-}
-
-// getRemoteDigest queries the registry for the digest of an image reference.
-// Returns empty string if the image doesn't exist or can't be queried.
-func getRemoteDigest(ctx context.Context, imageRef string, logger logging.Logger) (string, error) {
-	output, err := runDockerCommandWithOutput(ctx, []string{"buildx", "imagetools", "inspect", imageRef, "--format", "{{.Digest}}"}, logger)
-	if err != nil {
-		// Image doesn't exist or registry is unreachable — not an error for our purposes
-		return "", nil
-	}
-	digest := strings.TrimSpace(output)
-	if strings.HasPrefix(digest, "sha256:") {
-		return digest, nil
-	}
-	return "", nil
 }
 
 // buildAllPlatforms executes the build for all platforms, either via a single multi-platform
 // invocation (preferred — buildkit handles parallelism internally) or sequentially.
 func (e *Executor) buildAllPlatforms(ctx context.Context, opts MultiPlatformBuildOpts) ([]PlatformBuildResult, error) {
 	caps := e.backend.Capabilities()
+
+	// For OCI layout mode, set up a temp output directory
+	if opts.ExportMode == ExportOCILayout {
+		if opts.BuildOpts.OutputDir == "" {
+			tmpDir, err := os.MkdirTemp("", "pack-oci-layout-*")
+			if err != nil {
+				return nil, fmt.Errorf("creating temp output directory: %w", err)
+			}
+			opts.BuildOpts.OutputDir = tmpDir
+			// Note: cleanup is handled by the caller after push
+		}
+	}
 
 	// Prefer single-invocation multi-platform build — buildkit builds all arches
 	// in parallel and pushes the manifest list atomically.

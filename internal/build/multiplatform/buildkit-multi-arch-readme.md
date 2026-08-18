@@ -165,23 +165,25 @@ pack build registry.example.com/myapp:latest \
   --buildkit-cache-to type=registry,ref=registry.example.com/myapp-cache:latest,mode=max
 ```
 
-### Controlling Existing Tag Behavior
+### OCI Layout Export Mode (Not Yet Functional)
 
-```bash
-# Fail if the tag already exists
-pack build registry.example.com/myapp:latest \
-  --buildkit --platforms linux/amd64,linux/arm64 --publish \
-  --existing-tag-policy fail
+There is initial code for an `oci-layout` export mode (`--buildkit-export-mode=oci-layout`) that
+would avoid creating intermediate per-arch tags entirely. In this mode, the lifecycle would export
+to local OCI layout on disk, and pack would assemble the manifest list using `go-containerregistry`
+and push atomically.
 
-# Overwrite silently
-pack build registry.example.com/myapp:latest \
-  --buildkit --platforms linux/amd64,linux/arm64 --publish \
-  --existing-tag-policy overwrite
-```
+This mode is **not yet functional** because the lifecycle's `-layout` flag requires the run image
+to be pre-populated in the layout directory before the analyzer runs. Solving this requires either
+a tool like `crane` inside the builder container, or changes to how the lifecycle handles layout
+mode. Only `--buildkit-export-mode=registry` (the default) is supported at this time.
 
 ## Prerequisites
 
 - Docker with BuildKit support (Docker Engine 23.0+)
+- Pack experimental mode enabled:
+  ```bash
+  pack config experimental true
+  ```
 - A `docker-container` buildx builder for multi-platform builds:
   ```bash
   docker buildx create --name pack-multiplatform --driver docker-container --bootstrap
@@ -236,7 +238,7 @@ This forces a completely fresh build with no cached state from any source.
 | `--buildkit-builder` | Name of the buildx builder to use |
 | `--buildkit-cache-from` | External cache source for buildkit |
 | `--buildkit-cache-to` | External cache destination for buildkit |
-| `--existing-tag-policy` | Behavior when tag exists: `warn` (default), `fail`, `overwrite` |
+| `--buildkit-export-mode` | Export mode: `registry` (default, only supported mode currently) |
 
 ## Troubleshooting
 
@@ -320,18 +322,18 @@ variants may have different buildpack configurations. Workarounds:
 
 ## Limitations
 
+- Requires `pack config experimental true` (the entire buildkit feature is experimental)
 - Requires `--publish` (multi-arch manifest lists cannot be loaded to a local Docker daemon)
 - The `docker-container` buildx driver cannot access local-only images (`pack.local/...`);
   the Dockerfile references the original remote builder image and injects order/buildpacks separately
 - Cross-platform builds use QEMU emulation which is slower than native compilation
 - The `buildkit-llb` backend is a stub that falls back to `buildkit-dockerfile` (future work)
+- The `oci-layout` export mode relies on the lifecycle's experimental `-layout` flag
 
 ## Future Work
 
 - **LLB Backend**: Direct BuildKit Go SDK integration for streaming progress, no Dockerfile
   intermediate, and finer-grained control
-- **OCI Layout Export**: Export per-arch images to local OCI layout, assemble manifest list
-  using `go-containerregistry` in-process, push atomically (no registry access during build)
 - **Buildah Backend**: Support for `podman`/`buildah` multi-platform builds
 - **Buildpack COPY layers**: For custom `--buildpack` flags, copy buildpack binaries from
   their OCI images via `COPY --from` stages rather than needing an ephemeral builder

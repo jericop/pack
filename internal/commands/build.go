@@ -49,7 +49,7 @@ type BuildFlags struct {
 	BuildkitBuilder        string
 	BuildkitCacheFrom      []string
 	BuildkitCacheTo        []string
-	ExistingTagPolicy      string
+	BuildkitExportMode     string
 	Policy                 string
 	Network                string
 	DescriptorPath         string
@@ -199,7 +199,7 @@ func Build(logger logging.Logger, cfg config.Config, packClient PackClient) *cob
 				BuildkitBuilder:   flags.BuildkitBuilder,
 				BuildkitCacheFrom: flags.BuildkitCacheFrom,
 				BuildkitCacheTo:   flags.BuildkitCacheTo,
-				ExistingTagPolicy: flags.ExistingTagPolicy,
+				BuildkitExportMode: flags.BuildkitExportMode,
 				PullPolicy:        pullPolicy,
 				ClearCache:        flags.ClearCache,
 				TrustBuilder: func(string) bool {
@@ -306,7 +306,7 @@ This option may set DOCKER_HOST environment variable for the build container if 
 	cmd.Flags().StringVar(&buildFlags.BuildkitBuilder, "buildkit-builder", "", `Name of the buildx builder to use for multi-platform builds (default: current buildx default).`)
 	cmd.Flags().StringArrayVar(&buildFlags.BuildkitCacheFrom, "buildkit-cache-from", nil, `External cache source for buildkit (e.g., "type=registry,ref=myapp-cache:latest").`)
 	cmd.Flags().StringArrayVar(&buildFlags.BuildkitCacheTo, "buildkit-cache-to", nil, `External cache destination for buildkit (e.g., "type=registry,ref=myapp-cache:latest,mode=max").`)
-	cmd.Flags().StringVar(&buildFlags.ExistingTagPolicy, "existing-tag-policy", "warn", `Policy when target tag already exists in registry during buildkit builds. Values: "overwrite", "fail", "warn" (default).`)
+	cmd.Flags().StringVar(&buildFlags.BuildkitExportMode, "buildkit-export-mode", "registry", `How per-arch images are exported. "registry" (default): lifecycle pushes per-arch tags; "oci-layout": export to disk and push atomically (no temp tags).`)
 	cmd.Flags().StringVar(&buildFlags.Policy, "pull-policy", "", `Pull policy to use. Accepted values are always, never, and if-not-present. (default "always")`)
 	cmd.Flags().StringVar(&buildFlags.ExecutionEnv, "exec-env", "production", `Execution environment to use. (default "production"`)
 	cmd.Flags().StringVarP(&buildFlags.Registry, "buildpack-registry", "r", cfg.DefaultRegistryName, "Buildpack Registry by name")
@@ -327,6 +327,13 @@ This option may set DOCKER_HOST environment variable for the build container if 
 	if !cfg.Experimental {
 		cmd.Flags().MarkHidden("interactive")
 		cmd.Flags().MarkHidden("sparse")
+		cmd.Flags().MarkHidden("buildkit")
+		cmd.Flags().MarkHidden("platforms")
+		cmd.Flags().MarkHidden("build-backend")
+		cmd.Flags().MarkHidden("buildkit-builder")
+		cmd.Flags().MarkHidden("buildkit-cache-from")
+		cmd.Flags().MarkHidden("buildkit-cache-to")
+		cmd.Flags().MarkHidden("buildkit-export-mode")
 	}
 }
 
@@ -386,6 +393,10 @@ func validateBuildFlags(flags *BuildFlags, cfg config.Config, inputImageRef clie
 
 	if flags.Platforms != "" && !flags.Buildkit {
 		return errors.New("--platforms requires --buildkit flag (experimental feature)")
+	}
+
+	if flags.Buildkit && !cfg.Experimental {
+		return client.NewExperimentError("BuildKit multi-platform builds are currently experimental. Run 'pack config experimental true' to enable.")
 	}
 
 	return nil
