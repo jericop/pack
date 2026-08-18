@@ -286,10 +286,10 @@ func generateLifecycleRunMultiPlatform(opts PlatformBuildOpts) string {
 		if opts.ExportMode == ExportOCILayout {
 			args = convertToOCILayoutArgs(args, phase.Name, opts.ImageName)
 		} else {
-			// Registry mode: use per-arch tag so parallel builds don't overwrite each other
+			// Registry mode: use ephemeral per-arch tag so parallel builds don't overwrite each other
 			for i, arg := range args {
 				if arg == opts.ImageName {
-					args[i] = opts.ImageName + "-${TARGETARCH}"
+					args[i] = fmt.Sprintf("%s-build-%s-${TARGETARCH}", opts.ImageName, opts.BuildID)
 				}
 			}
 		}

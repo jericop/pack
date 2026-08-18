@@ -127,7 +127,7 @@ func (b *DockerfileBackend) BuildMultiPlatform(ctx context.Context, platforms []
 	// Construct results with the actual per-arch tag references
 	results := make([]PlatformBuildResult, len(platforms))
 	for i, p := range platforms {
-		perArchTag := fmt.Sprintf("%s-%s", opts.ImageName, p.Arch)
+		perArchTag := fmt.Sprintf("%s-build-%s-%s", opts.ImageName, opts.BuildID, p.Arch)
 		results[i] = PlatformBuildResult{
 			Platform: p,
 			ImageRef: perArchTag,

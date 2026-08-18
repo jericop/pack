@@ -61,7 +61,7 @@ func (e *Executor) Execute(ctx context.Context, opts MultiPlatformBuildOpts) ([]
 		for i, p := range opts.Platforms {
 			perArchRefs[i] = PlatformBuildResult{
 				Platform: p,
-				ImageRef: fmt.Sprintf("%s-%s", opts.ManifestListName, p.Arch),
+				ImageRef: fmt.Sprintf("%s-build-%s-%s", opts.ManifestListName, opts.BuildOpts.BuildID, p.Arch),
 			}
 		}
 

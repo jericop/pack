@@ -123,6 +123,10 @@ type PlatformBuildOpts struct {
 	// CacheID is a unique identifier for this app+arch cache (used for cache mount IDs).
 	CacheID string
 
+	// BuildID is a short unique identifier for this build invocation.
+	// Used to create ephemeral per-arch tags (e.g., image:build-<id>-<arch>).
+	BuildID string
+
 	// ImageName is the target image name. For registry push, this is the full reference.
 	// For per-arch images, the backend may append an arch-specific tag.
 	ImageName string

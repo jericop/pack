@@ -165,6 +165,63 @@ pack build registry.example.com/myapp:latest \
   --buildkit-cache-to type=registry,ref=registry.example.com/myapp-cache:latest,mode=max
 ```
 
+### Using the LLB Backend
+
+The LLB backend uses the BuildKit Go SDK directly instead of generating a Dockerfile. It
+connects to the buildkit daemon inside the `docker-container` driver builder and constructs
+the build graph programmatically.
+
+```bash
+pack build registry.example.com/myapp:latest \
+  --path ./app \
+  --builder paketobuildpacks/ubuntu-noble-builder:latest \
+  --run-image paketobuildpacks/ubuntu-noble-run-tiny:latest \
+  --platforms linux/amd64,linux/arm64 \
+  --buildkit \
+  --publish \
+  --buildkit-builder pack-multiplatform \
+  --build-backend buildkit-llb
+```
+
+Requirements for the LLB backend:
+- A `docker-container` driver buildx builder (the LLB client connects to the buildkit daemon
+  inside the builder container via `docker-container://buildx_buildkit_<builder-name>0`)
+- The builder must be running (`docker buildx inspect --bootstrap <builder-name>`)
+
+The LLB backend provides:
+- No intermediate Dockerfile generated
+- Programmatic control over the build graph
+- Same phase isolation (secret mounts only on analyzer/exporter)
+- Same ephemeral tag format (`build-<id>-<arch>`)
+
+### Using a Remote BuildKit Daemon (CI)
+
+In CI environments, you may have a dedicated remote buildkit daemon rather than a local
+docker-container builder. Create a remote buildx builder pointing to it:
+
+```bash
+# Register the remote buildkit daemon as a buildx builder
+docker buildx create --name ci-builder \
+  --driver remote \
+  tcp://buildkit.internal:1234
+
+# Use it with pack
+pack build registry.example.com/myapp:latest \
+  --path ./app \
+  --builder paketobuildpacks/ubuntu-noble-builder:latest \
+  --platforms linux/amd64,linux/arm64 \
+  --buildkit \
+  --publish \
+  --buildkit-builder ci-builder \
+  --buildkit-cache-from type=registry,ref=registry.example.com/myapp-cache:latest \
+  --buildkit-cache-to type=registry,ref=registry.example.com/myapp-cache:latest,mode=max
+```
+
+For the LLB backend with a remote daemon, the connection is resolved from the builder's
+container name (`buildx_buildkit_<builder-name>0`). Remote builders use a TCP endpoint
+directly. The LLB backend currently supports `docker-container` driver builders; remote
+driver support is planned.
+
 ### OCI Layout Export Mode (Not Yet Functional)
 
 There is initial code for an `oci-layout` export mode (`--buildkit-export-mode=oci-layout`) that
@@ -332,8 +389,9 @@ variants may have different buildpack configurations. Workarounds:
 
 ## Future Work
 
-- **LLB Backend**: Direct BuildKit Go SDK integration for streaming progress, no Dockerfile
-  intermediate, and finer-grained control
+- **LLB Backend Improvements**: Streaming progress display, parallel per-platform solves,
+  better error messages from the buildkit daemon
 - **Buildah Backend**: Support for `podman`/`buildah` multi-platform builds
 - **Buildpack COPY layers**: For custom `--buildpack` flags, copy buildpack binaries from
   their OCI images via `COPY --from` stages rather than needing an ephemeral builder
+- **OCI Layout Export**: Complete the OCI layout export mode to avoid intermediate registry tags

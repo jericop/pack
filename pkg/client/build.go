@@ -923,6 +923,9 @@ func (c *Client) buildMultiPlatform(ctx context.Context, opts BuildOptions, life
 	// Generate a cache ID based on the image name
 	cacheID := fmt.Sprintf("pack-cache-%s", sanitizeCacheID(lifecycleOpts.Image.Name()))
 
+	// Generate a short build ID for ephemeral per-arch tags
+	buildID := generateBuildID()
+
 	// Resolve docker config path for registry auth
 	dockerConfigPath := resolveDockerConfigPath()
 
@@ -934,6 +937,7 @@ func (c *Client) buildMultiPlatform(ctx context.Context, opts BuildOptions, life
 		AppPath:          appPath,
 		Phases:           phases,
 		CacheID:          cacheID,
+		BuildID:          buildID,
 		ImageName:        lifecycleOpts.Image.Name(),
 		Publish:          opts.Publish,
 		DockerConfigPath: dockerConfigPath,
@@ -1045,6 +1049,13 @@ func sanitizeCacheID(imageName string) string {
 	// Replace characters that aren't valid in buildkit cache IDs
 	replacer := strings.NewReplacer("/", "_", ":", "_", ".", "-")
 	return replacer.Replace(imageName)
+}
+
+// generateBuildID creates a short unique identifier for ephemeral build tags.
+func generateBuildID() string {
+	b := make([]byte, 4)
+	rand.Read(b)
+	return hex.EncodeToString(b)
 }
 
 // resolveDockerConfigPath returns the path to the Docker config.json file.
