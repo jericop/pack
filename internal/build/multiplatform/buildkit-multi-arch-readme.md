@@ -193,6 +193,43 @@ The LLB backend provides:
 - Programmatic control over the build graph
 - Same phase isolation (secret mounts only on analyzer/exporter)
 - Same ephemeral tag format (`build-<id>-<arch>`)
+- Platform-prefixed log output (`[linux/amd64] ...`) for clear per-arch visibility
+
+### Dockerfile vs LLB Backend: Tradeoffs
+
+The **Dockerfile backend** (`--build-backend=buildkit-dockerfile`, default) is recommended for
+most use cases. It is faster and supports full caching.
+
+| Aspect | Dockerfile (default) | LLB |
+|--------|---------------------|-----|
+| Multi-platform parallelism | Yes (single buildx invocation) | Yes (parallel errgroup solves) |
+| Lifecycle buildpack cache | Yes (`--mount=type=cache,uid=1001`) | No (not supported) |
+| BuildKit layer cache | Yes (automatic) | Yes (automatic) |
+| Build speed on repeat builds | Fast (cached layers + lifecycle cache) | Slower (no lifecycle cache) |
+| Debuggable | Yes (Dockerfile is human-readable) | No intermediate artifact |
+| Reproducible externally | Yes (copy the Dockerfile) | No |
+| Registry-based cache (`--buildkit-cache-from/to`) | Yes | Yes |
+
+**Why LLB cannot use lifecycle cache mounts:**
+
+The lifecycle's restorer/exporter always attempt to `chown` the cache directory to the CNB user
+regardless of existing permissions. In buildkit's unprivileged execution environment, `chown`
+fails with "operation not permitted."
+
+The Dockerfile frontend works around this because it handles cache mount uid/gid at the
+*solver level* via an internal step (`[internal] setting cache mount permissions`) that
+pre-creates the mount with the correct ownership using kernel-level mount options — not a
+userspace `chown`. This capability is specific to the Dockerfile frontend and is not exposed
+through the raw LLB API. The `llb.AsPersistentCacheDir` function does not accept uid/gid
+parameters, and `llb.Mkdir` with `llb.WithUIDGID` on the source state does not propagate
+ownership to the actual mount point because the persistent cache volume's root directory
+ownership is managed by buildkit's snapshot driver, not by the LLB layer.
+
+Until either:
+1. The buildkit LLB API exposes uid/gid on cache mounts, or
+2. The lifecycle adds an option to skip the chown of the cache directory
+
+...the LLB backend cannot use persistent lifecycle cache mounts.
 
 ### Using a Remote BuildKit Daemon (CI)
 

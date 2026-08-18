@@ -6,6 +6,8 @@ import (
 	"os"
 	"strings"
 
+	"golang.org/x/sync/errgroup"
+
 	"github.com/moby/buildkit/client"
 	"github.com/moby/buildkit/client/llb"
 	_ "github.com/moby/buildkit/client/connhelper/dockercontainer" // register docker-container:// scheme
@@ -60,8 +62,11 @@ func (b *LLBBackend) Build(ctx context.Context, opts PlatformBuildOpts) (Platfor
 }
 
 // BuildMultiPlatform builds all platforms using the LLB API.
-// Each platform is solved separately against the buildkit daemon.
+// Each platform is solved in parallel against the buildkit daemon.
 func (b *LLBBackend) BuildMultiPlatform(ctx context.Context, platforms []Platform, opts PlatformBuildOpts) ([]PlatformBuildResult, error) {
+	// Log the equivalent Dockerfile for debugging
+	b.logger.Debugf("Equivalent Dockerfile (for reference):\n%s", GenerateDockerfileMultiPlatform(opts))
+
 	// Connect to the buildkit daemon
 	bkClient, err := b.connectToBuildkit(ctx)
 	if err != nil {
@@ -69,16 +74,25 @@ func (b *LLBBackend) BuildMultiPlatform(ctx context.Context, platforms []Platfor
 	}
 	defer bkClient.Close()
 
-	// Build each platform
+	// Build all platforms in parallel
 	results := make([]PlatformBuildResult, len(platforms))
-	for i, platform := range platforms {
-		b.logger.Infof("Building for %s via LLB", platform.String())
+	g, gCtx := errgroup.WithContext(ctx)
 
-		result, err := b.solvePlatform(ctx, bkClient, platform, opts)
-		if err != nil {
-			return nil, fmt.Errorf("solving for %s: %w", platform.String(), err)
-		}
-		results[i] = result
+	for i, platform := range platforms {
+		i, platform := i, platform
+		g.Go(func() error {
+			b.logger.Infof("Building for %s via LLB", platform.String())
+			result, err := b.solvePlatform(gCtx, bkClient, platform, opts)
+			if err != nil {
+				return fmt.Errorf("solving for %s: %w", platform.String(), err)
+			}
+			results[i] = result
+			return nil
+		})
+	}
+
+	if err := g.Wait(); err != nil {
+		return nil, err
 	}
 
 	return results, nil
@@ -239,12 +253,14 @@ func (b *LLBBackend) buildLLBState(opts PlatformBuildOpts, platform Platform, pe
 	)
 
 	// Cache mount options
-	// Note: buildkit cache mounts in LLB don't support uid/gid ownership settings.
-	// The lifecycle restorer tries to chown the cache dir which fails in unprivileged buildkit.
-	// We use a regular directory instead — lifecycle caching still works within a single build,
-	// but doesn't persist across builds. Use --buildkit-cache-from/to for cross-build caching.
+	// NOTE: BuildKit's Dockerfile frontend handles cache mount uid/gid via internal solver
+	// hooks that are not accessible from the raw LLB API. The lifecycle's restorer always
+	// tries to chown the cache directory, which fails in unprivileged buildkit.
+	// For the LLB backend, we skip persistent cache mounts. Repeated builds without source
+	// changes still benefit from buildkit's layer caching. For full lifecycle caching,
+	// use the Dockerfile backend (--build-backend=buildkit-dockerfile).
 	cacheID := fmt.Sprintf("%s-%s", opts.CacheID, platform.Arch)
-	_ = cacheID // reserved for future use when LLB supports uid on cache mounts
+	_ = cacheID
 
 	// Secret mount for registry auth
 	secretMountOpt := llb.AddSecret("/home/cnb/.docker/config.json",
@@ -270,7 +286,6 @@ func (b *LLBBackend) buildLLBState(opts PlatformBuildOpts, platform Platform, pe
 		append([]llb.RunOption{
 			llb.Args(analyzerArgs),
 			llb.WithCustomName("lifecycle: analyzer"),
-			
 			secretMountOpt,
 		}, envOpts...)...,
 	).Root()
@@ -284,26 +299,16 @@ func (b *LLBBackend) buildLLBState(opts PlatformBuildOpts, platform Platform, pe
 		}, envOpts...)...,
 	).Root()
 
-	// Phase: Restorer (needs cache)
+	// Phase: Restorer (no persistent cache in LLB backend)
 	restorerArgs := buildPhaseArgs(opts, "restorer", perArchTag)
 	restorerArgs = append(restorerArgs[:1], append([]string{"-uid", fmt.Sprintf("%d", opts.BuilderUID), "-gid", fmt.Sprintf("%d", opts.BuilderGID)}, restorerArgs[1:]...)...)
-	if !opts.ClearCache {
-		base = base.Run(
-			append([]llb.RunOption{
-				llb.Args(restorerArgs),
-				llb.WithCustomName("lifecycle: restorer"),
-				
-			}, envOpts...)...,
-		).Root()
-	} else {
-		restorerArgs = removeCacheArgs(restorerArgs)
-		base = base.Run(
-			append([]llb.RunOption{
-				llb.Args(restorerArgs),
-				llb.WithCustomName("lifecycle: restorer"),
-			}, envOpts...)...,
-		).Root()
-	}
+	restorerArgs = removeCacheArgs(restorerArgs)
+	base = base.Run(
+		append([]llb.RunOption{
+			llb.Args(restorerArgs),
+			llb.WithCustomName("lifecycle: restorer"),
+		}, envOpts...)...,
+	).Root()
 
 	// Phase: Builder
 	builderArgs := buildPhaseArgs(opts, "builder", perArchTag)
@@ -314,28 +319,17 @@ func (b *LLBBackend) buildLLBState(opts PlatformBuildOpts, platform Platform, pe
 		}, envOpts...)...,
 	).Root()
 
-	// Phase: Exporter (needs registry auth + cache)
+	// Phase: Exporter (needs registry auth, no persistent cache)
 	exporterArgs := buildPhaseArgs(opts, "exporter", perArchTag)
 	exporterArgs = append(exporterArgs[:1], append([]string{"-uid", fmt.Sprintf("%d", opts.BuilderUID), "-gid", fmt.Sprintf("%d", opts.BuilderGID)}, exporterArgs[1:]...)...)
-	if opts.ClearCache {
-		exporterArgs = removeCacheArgs(exporterArgs)
-		base = base.Run(
-			append([]llb.RunOption{
-				llb.Args(exporterArgs),
-				llb.WithCustomName("lifecycle: exporter"),
-				secretMountOpt,
-			}, envOpts...)...,
-		).Root()
-	} else {
-		base = base.Run(
-			append([]llb.RunOption{
-				llb.Args(exporterArgs),
-				llb.WithCustomName("lifecycle: exporter"),
-				
-				secretMountOpt,
-			}, envOpts...)...,
-		).Root()
-	}
+	exporterArgs = removeCacheArgs(exporterArgs)
+	base = base.Run(
+		append([]llb.RunOption{
+			llb.Args(exporterArgs),
+			llb.WithCustomName("lifecycle: exporter"),
+			secretMountOpt,
+		}, envOpts...)...,
+	).Root()
 
 	return base
 }
