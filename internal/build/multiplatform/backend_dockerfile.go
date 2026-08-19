@@ -43,46 +43,17 @@ func (b *DockerfileBackend) Capabilities() BackendCapabilities {
 	}
 }
 
-// Build generates a Dockerfile from the phase commands, writes it to a temp directory,
-// and executes `docker buildx build` for the target platform.
-// For single-platform builds this is called once; for multi-platform the executor
-// should use BuildMultiPlatform instead.
+// Build satisfies the BuildBackend interface for single-platform builds.
+// It delegates to BuildMultiPlatform with a single platform.
 func (b *DockerfileBackend) Build(ctx context.Context, opts PlatformBuildOpts) (PlatformBuildResult, error) {
-	// Generate the Dockerfile content
-	dockerfileContent := GenerateDockerfile(opts)
-
-	// Create a temporary build context directory
-	buildDir, err := os.MkdirTemp("", "pack-multiplatform-*")
+	results, err := b.BuildMultiPlatform(ctx, []Platform{opts.Platform}, opts)
 	if err != nil {
-		return PlatformBuildResult{}, fmt.Errorf("creating temp build directory: %w", err)
+		return PlatformBuildResult{}, err
 	}
-	defer os.RemoveAll(buildDir)
-
-	// Write the Dockerfile
-	dockerfilePath := filepath.Join(buildDir, "Dockerfile")
-	if err := os.WriteFile(dockerfilePath, []byte(dockerfileContent), 0644); err != nil {
-		return PlatformBuildResult{}, fmt.Errorf("writing Dockerfile: %w", err)
+	if len(results) == 0 {
+		return PlatformBuildResult{}, fmt.Errorf("no results from build")
 	}
-
-	// Log the Dockerfile for debugging
-	b.logger.Debugf("Generated Dockerfile for %s:\n%s", opts.Platform.String(), dockerfileContent)
-
-	// Build the docker buildx build command
-	args := b.buildBuildxArgs(opts, dockerfilePath, []Platform{opts.Platform})
-
-	b.logger.Debugf("Executing: docker %v", args)
-
-	// Run the build
-	if err := runDockerCommand(ctx, args, b.logger); err != nil {
-		return PlatformBuildResult{}, fmt.Errorf("docker buildx build for %s: %w", opts.Platform.String(), err)
-	}
-
-	result := PlatformBuildResult{
-		Platform: opts.Platform,
-		ImageRef: opts.ImageName,
-	}
-
-	return result, nil
+	return results[0], nil
 }
 
 // BuildMultiPlatform generates a Dockerfile and runs a single `docker buildx build`
@@ -202,23 +173,11 @@ func (b *DockerfileBackend) buildBuildxArgs(opts PlatformBuildOpts, dockerfilePa
 	return args
 }
 
-// SaveDockerfile writes the generated Dockerfile to a specified path for debugging.
-// This can be used with a --dump-dockerfile flag.
-func SaveDockerfile(opts PlatformBuildOpts, outputPath string) error {
-	content := GenerateDockerfile(opts)
-	dir := filepath.Dir(outputPath)
-	if err := os.MkdirAll(dir, 0755); err != nil {
-		return fmt.Errorf("creating directory for Dockerfile: %w", err)
-	}
-	return os.WriteFile(outputPath, []byte(content), 0644)
-}
-
 // parseLifecycleDigests extracts image digests from lifecycle exporter output.
 // The lifecycle prints lines like "*** Digest: sha256:abc123..." for each exported image.
 func parseLifecycleDigests(output string) []string {
 	var digests []string
 	for _, line := range strings.Split(output, "\n") {
-		// Look for the lifecycle's digest output pattern
 		if idx := strings.Index(line, "*** Digest: "); idx >= 0 {
 			digest := strings.TrimSpace(line[idx+len("*** Digest: "):])
 			if strings.HasPrefix(digest, "sha256:") {
