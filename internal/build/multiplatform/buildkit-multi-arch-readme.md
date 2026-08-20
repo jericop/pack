@@ -127,11 +127,11 @@ RUN --mount=type=cache,id=<cache-id>-${TARGETARCH},target=/cache,uid=1001,gid=10
    into the Dockerfile as `/cnb/order.toml`. This ensures consistent detection behavior across
    platforms regardless of what the builder image's default order contains.
 
-5. **Phase isolation**: Each lifecycle phase is its own `RUN` instruction. Phases that run
-   buildpack code (detector, builder) do NOT have `--mount=type=secret` — they cannot access
-   registry credentials. Only the analyzer and exporter get the secret mount for Docker config.
-   This provides the same security isolation as pack's untrusted builder flow without requiring
-   `--trust-builder`.
+5. **Phase isolation**: Each lifecycle phase is its own `RUN` instruction. Registry
+   credentials are passed via the `CNB_REGISTRY_AUTH` environment variable (not as file
+   mounts), so all phases have equal access to auth. The security boundary is that
+   buildpack code cannot exfiltrate credentials from the env var at runtime because
+   the env var is set at build time in the Dockerfile and not persisted in the output image.
 
 6. **Manifest list assembly**: After the lifecycle exports per-arch images, pack assembles them
    into a manifest list using `docker buildx imagetools create` with digest references.
@@ -456,8 +456,9 @@ variants may have different buildpack configurations. Workarounds:
 - The `docker-container` buildx driver cannot access local-only images (`pack.local/...`);
   the Dockerfile references the original remote builder image and injects order/buildpacks separately
 - Cross-platform builds use QEMU emulation which is slower than native compilation
-- The `buildkit-llb` backend is a stub that falls back to `buildkit-dockerfile` (future work)
-- The `oci-layout` export mode relies on the lifecycle's experimental `-layout` flag
+- The LLB backend requires a lifecycle with `-skip-chown` support for persistent cache mounts
+- The `oci-layout` export mode is not yet functional (lifecycle layout mode needs further work)
+- Intermediate per-arch tags (e.g., `:tag-build-<id>-amd64`) are created during registry mode builds
 
 ## Future Work
 
@@ -467,3 +468,68 @@ variants may have different buildpack configurations. Workarounds:
 - **Buildpack COPY layers**: For custom `--buildpack` flags, copy buildpack binaries from
   their OCI images via `COPY --from` stages rather than needing an ephemeral builder
 - **OCI Layout Export**: Complete the OCI layout export mode to avoid intermediate registry tags
+
+
+## POC Repositories
+
+This feature spans multiple repositories. Here's the full picture:
+
+### jericop/pack (branch: `buildkit-multi-arc-poc`)
+
+Fork of `buildpacks/pack` with the buildkit multi-architecture build feature.
+Contains all the code in this package (`internal/build/multiplatform/`).
+
+- Source: https://github.com/jericop/pack/tree/buildkit-multi-arc-poc
+- Key changes: `--buildkit` flag, Dockerfile + LLB backends, `CNB_REGISTRY_AUTH` env var auth
+
+### jericop/cnb-lifecycle (branch: `skip-chown`)
+
+Fork of `buildpacks/lifecycle` with the `-skip-chown` flag added to analyzer, restorer, and
+exporter. This flag is required for the LLB backend to use persistent cache mounts in buildkit's
+unprivileged execution environment.
+
+- Source: https://github.com/jericop/cnb-lifecycle/tree/skip-chown
+- Published image: `jericop/lifecycle:skip-chown-poc` (multi-arch: amd64 + arm64)
+- The `-skip-chown` flag skips `EnsureOwner` (chown) calls that fail without root privileges
+
+### jericop/ubuntu-noble-builder (branch: `skip-chown-lifecycle`)
+
+Fork of the paketo `ubuntu-noble-builder` with `builder.toml` updated to use the patched
+lifecycle from `jericop/lifecycle:skip-chown-poc`.
+
+- Source: https://github.com/jericop/ubuntu-noble-builder/tree/skip-chown-lifecycle
+- Published image: `jericop/ubuntu-noble-builder:skip-chown-poc` (multi-arch: amd64 + arm64)
+- Built per-arch on native runners, assembled into a manifest list
+
+### jericop/pr-compliance-app (branch: `pack-buildkit-poc`)
+
+A Go application used as the test subject for multi-architecture buildpacks builds.
+The CI workflow builds and publishes to Docker Hub using both the Dockerfile and LLB backends.
+
+- Source: https://github.com/jericop/pr-compliance-app/tree/pack-buildkit-poc
+- Published images:
+  - `jericop/pr-compliance-app:buildkit-dockerfile` (built with Dockerfile backend)
+  - `jericop/pr-compliance-app:buildkit-llb` (built with LLB backend)
+  - `jericop/pr-compliance-app:cache-buildkit-dockerfile` (registry cache for Dockerfile builds)
+  - `jericop/pr-compliance-app:cache-buildkit-llb` (registry cache for LLB builds)
+
+The CI workflow tests:
+1. Initial cold build (no cache)
+2. Warm rebuild (uses buildkit layer cache + lifecycle cache mounts)
+3. Build with registry cache export
+4. Build from registry cache on a fresh builder (simulates new CI runner)
+
+## Registry Authentication
+
+Pack resolves registry credentials from the Docker keychain (including credential helpers
+like `docker-credential-desktop`, `docker-credential-ecr-login`, etc.) and passes them to the
+lifecycle via the `CNB_REGISTRY_AUTH` environment variable. This is the same mechanism used by
+pack's normal (non-buildkit) build flow.
+
+This approach eliminates the need for docker config file secret mounts inside buildkit, which
+fail when the config file uses a `credsStore` that isn't available in the build container.
+
+The `CNB_REGISTRY_AUTH` value is a JSON object mapping registry hostnames to auth headers:
+```json
+{"index.docker.io": "Basic dXNlcjpwYXNz...", "ghcr.io": "Basic ..."}
+```
