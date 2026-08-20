@@ -11,8 +11,6 @@ import (
 	"github.com/moby/buildkit/client"
 	"github.com/moby/buildkit/client/llb"
 	_ "github.com/moby/buildkit/client/connhelper/dockercontainer" // register docker-container:// scheme
-	"github.com/moby/buildkit/session"
-	"github.com/moby/buildkit/session/secrets/secretsprovider"
 	ocispecs "github.com/opencontainers/image-spec/specs-go/v1"
 	"github.com/tonistiigi/fsutil"
 
@@ -158,17 +156,6 @@ func (b *LLBBackend) solvePlatform(ctx context.Context, bkClient *client.Client,
 		return PlatformBuildResult{}, fmt.Errorf("marshaling LLB for %s: %w", platform.String(), err)
 	}
 
-	// Set up secrets session (for registry auth)
-	var sessions []session.Attachable
-	if opts.DockerConfigPath != "" {
-		store, err := secretsprovider.NewStore([]secretsprovider.Source{
-			{ID: "docker-config", FilePath: opts.DockerConfigPath},
-		})
-		if err == nil {
-			sessions = append(sessions, secretsprovider.NewSecretProvider(store))
-		}
-	}
-
 	// Set up progress display — format output similar to docker buildx
 	ch := make(chan *client.SolveStatus)
 	platformPrefix := fmt.Sprintf("[%s]", platform.String())
@@ -231,7 +218,7 @@ func (b *LLBBackend) solvePlatform(ctx context.Context, bkClient *client.Client,
 		LocalMounts: map[string]fsutil.FS{
 			"context": appFS,
 		},
-		Session:             sessions,
+		
 		CacheImports:        b.parseCacheImports(),
 		CacheExports:        b.parseCacheExports(),
 		FrontendAttrs:       map[string]string{},
@@ -305,10 +292,8 @@ func (b *LLBBackend) buildLLBState(opts PlatformBuildOpts, platform Platform, pe
 		llb.AsPersistentCacheDir(cacheID, llb.CacheMountShared),
 	)
 
-	// Secret mount for registry auth
-	secretMountOpt := llb.AddSecret("/home/cnb/.docker/config.json",
-		llb.SecretID("docker-config"),
-	)
+	// Secret mount for registry auth — no longer needed.
+	// CNB_REGISTRY_AUTH env var is used instead (set in envOpts below).
 
 	// Environment and user for lifecycle phases
 	// All phases run as the CNB user, matching the Dockerfile backend's USER directive.
@@ -318,6 +303,9 @@ func (b *LLBBackend) buildLLBState(opts PlatformBuildOpts, platform Platform, pe
 		llb.AddEnv("CNB_USER_ID", fmt.Sprintf("%d", opts.BuilderUID)),
 		llb.AddEnv("CNB_GROUP_ID", fmt.Sprintf("%d", opts.BuilderGID)),
 		llb.User(cnbUser),
+	}
+	if opts.RegistryAuth != "" {
+		envOpts = append(envOpts, llb.AddEnv("CNB_REGISTRY_AUTH", opts.RegistryAuth))
 	}
 
 	// --- Lifecycle phases ---
@@ -338,7 +326,6 @@ func (b *LLBBackend) buildLLBState(opts PlatformBuildOpts, platform Platform, pe
 			llb.Args(analyzerArgs),
 			llb.WithCustomName("lifecycle: analyzer"),
 			cacheMountOpt,
-			secretMountOpt,
 		}, envOpts...)...,
 	).Root()
 
@@ -379,7 +366,6 @@ func (b *LLBBackend) buildLLBState(opts PlatformBuildOpts, platform Platform, pe
 			llb.Args(exporterArgs),
 			llb.WithCustomName("lifecycle: exporter"),
 			cacheMountOpt,
-			secretMountOpt,
 		}, envOpts...)...,
 	).Root()
 
