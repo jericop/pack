@@ -272,7 +272,7 @@ func (b *LLBBackend) buildLLBState(opts PlatformBuildOpts, platform Platform, pe
 		).Root()
 	}
 
-	// Copy app source
+	// Copy app source and ensure writable by CNB user
 	appSource := llb.Local("context")
 	base = base.File(
 		llb.Copy(appSource, "/", "/workspace", &llb.CopyInfo{
@@ -282,6 +282,10 @@ func (b *LLBBackend) buildLLBState(opts PlatformBuildOpts, platform Platform, pe
 		}),
 		llb.WithCustomName("copy app source"),
 	)
+	base = base.Run(
+		llb.Args([]string{"/bin/sh", "-c", "chmod -R 777 /workspace"}),
+		llb.WithCustomName("fix workspace permissions"),
+	).Root()
 
 	// Cache mount options
 	// With the patched lifecycle (-skip-chown flag), we can use persistent cache mounts.
