@@ -69,6 +69,9 @@ func GenerateDockerfileMultiPlatform(opts PlatformBuildOpts) string {
 
 	// Set environment variables
 	b.WriteString(fmt.Sprintf("ENV CNB_PLATFORM_API=%s\n", opts.PlatformAPI))
+	if opts.RegistryAuth != "" {
+		b.WriteString(fmt.Sprintf("ENV CNB_REGISTRY_AUTH='%s'\n", opts.RegistryAuth))
+	}
 	if opts.ExportMode == ExportOCILayout {
 		b.WriteString("ENV CNB_EXPERIMENTAL_MODE=warn\n")
 	}
@@ -103,7 +106,7 @@ func generateLifecycleRunMultiPlatform(opts PlatformBuildOpts) string {
 		"--mount=type=cache,id=%s-${TARGETARCH},target=/cache,uid=%d,gid=%d",
 		opts.CacheID, opts.BuilderUID, opts.BuilderGID,
 	)
-	secretMount := "--mount=type=secret,id=docker-config,target=/home/cnb/.docker/config.json"
+	secretMount := "" // No longer needed — CNB_REGISTRY_AUTH env var handles auth
 
 	// When ClearCache is set, skip the persistent cache mount entirely.
 	if opts.ClearCache {

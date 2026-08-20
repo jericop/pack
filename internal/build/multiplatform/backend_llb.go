@@ -169,24 +169,51 @@ func (b *LLBBackend) solvePlatform(ctx context.Context, bkClient *client.Client,
 		}
 	}
 
-	// Set up progress display — prefix logs with platform for clarity
+	// Set up progress display — format output similar to docker buildx
 	ch := make(chan *client.SolveStatus)
 	platformPrefix := fmt.Sprintf("[%s]", platform.String())
+	vertexStartTimes := make(map[string]int64)
+	vertexNumbers := make(map[string]int)
+	vertexCounter := 0
 	go func() {
 		for status := range ch {
 			for _, v := range status.Vertexes {
-				if v.Error != "" {
-					fmt.Fprintf(os.Stderr, "%s %s: %s\n", platformPrefix, v.Name, v.Error)
-				} else if v.Started != nil && v.Completed == nil {
-					fmt.Fprintf(os.Stderr, "%s %s\n", platformPrefix, v.Name)
+				id := v.Digest.String()
+				if v.Started != nil && vertexStartTimes[id] == 0 {
+					vertexCounter++
+					vertexStartTimes[id] = v.Started.UnixMilli()
+					vertexNumbers[id] = vertexCounter
+					fmt.Fprintf(os.Stderr, "#%d %s %s\n", vertexCounter, platformPrefix, v.Name)
+				}
+				if v.Completed != nil {
+					num := vertexNumbers[id]
+					startMs := vertexStartTimes[id]
+					var duration float64
+					if startMs > 0 {
+						duration = float64(v.Completed.UnixMilli()-startMs) / 1000.0
+					}
+					if v.Cached {
+						fmt.Fprintf(os.Stderr, "#%d %s %s CACHED\n", num, platformPrefix, v.Name)
+					} else if v.Error != "" {
+						fmt.Fprintf(os.Stderr, "#%d %s %s ERROR: %s\n", num, platformPrefix, v.Name, v.Error)
+					} else {
+						fmt.Fprintf(os.Stderr, "#%d %s %s DONE %.1fs\n", num, platformPrefix, v.Name, duration)
+					}
 				}
 			}
 			for _, l := range status.Logs {
-				// Prefix each line of output with the platform
+				// Find the step number for this log's vertex
+				stepNum := 0
+				for id, num := range vertexNumbers {
+					if id == l.Vertex.String() {
+						stepNum = num
+						break
+					}
+				}
 				lines := strings.Split(string(l.Data), "\n")
 				for _, line := range lines {
 					if line != "" {
-						fmt.Fprintf(os.Stderr, "%s %s\n", platformPrefix, line)
+						fmt.Fprintf(os.Stderr, "#%d %s %s\n", stepNum, platformPrefix, line)
 					}
 				}
 			}
@@ -225,6 +252,23 @@ func (b *LLBBackend) buildLLBState(opts PlatformBuildOpts, platform Platform, pe
 	// Start from the builder image
 	base := llb.Image(opts.BuilderImage)
 
+	// If a lifecycle image is specified, replace the lifecycle binaries.
+	// Use a RUN step to remove existing and copy from the lifecycle image.
+	if opts.LifecycleImage != "" && !strings.HasPrefix(opts.LifecycleImage, "pack.local/") {
+		lifecycleImg := llb.Image(opts.LifecycleImage)
+		// First remove the existing lifecycle, then copy from the image
+		base = base.Run(
+			llb.Args([]string{"/bin/sh", "-c", "rm -rf /cnb/lifecycle"}),
+			llb.WithCustomName("remove existing lifecycle"),
+		).Root()
+		base = base.File(
+			llb.Copy(lifecycleImg, "/cnb/lifecycle", "/cnb/lifecycle", &llb.CopyInfo{
+				CreateDestPath: true,
+			}),
+			llb.WithCustomName("copy lifecycle from "+opts.LifecycleImage),
+		)
+	}
+
 	// Run setup — make directories world-writable since chown may not work in unprivileged buildkit
 	base = base.Run(
 		llb.Args([]string{"/bin/sh", "-c", "mkdir -p /cache /output /layers /platform && chmod -R 777 /cache /output /layers"}),
@@ -253,14 +297,13 @@ func (b *LLBBackend) buildLLBState(opts PlatformBuildOpts, platform Platform, pe
 	)
 
 	// Cache mount options
-	// NOTE: BuildKit's Dockerfile frontend handles cache mount uid/gid via internal solver
-	// hooks that are not accessible from the raw LLB API. The lifecycle's restorer always
-	// tries to chown the cache directory, which fails in unprivileged buildkit.
-	// For the LLB backend, we skip persistent cache mounts. Repeated builds without source
-	// changes still benefit from buildkit's layer caching. For full lifecycle caching,
-	// use the Dockerfile backend (--build-backend=buildkit-dockerfile).
+	// With the patched lifecycle (-skip-chown flag), we can use persistent cache mounts.
+	// The lifecycle will skip the chown attempt that fails in unprivileged buildkit.
 	cacheID := fmt.Sprintf("%s-%s", opts.CacheID, platform.Arch)
-	_ = cacheID
+	cacheMountOpt := llb.AddMount("/cache",
+		llb.Scratch(),
+		llb.AsPersistentCacheDir(cacheID, llb.CacheMountShared),
+	)
 
 	// Secret mount for registry auth
 	secretMountOpt := llb.AddSecret("/home/cnb/.docker/config.json",
@@ -278,14 +321,23 @@ func (b *LLBBackend) buildLLBState(opts PlatformBuildOpts, platform Platform, pe
 	}
 
 	// --- Lifecycle phases ---
+	// All analyzer/restorer/exporter args include -skip-chown -uid -gid
+
+	// Ensure cache mount is writable by CNB user (buildkit creates it as root:0755)
+	base = base.Run(
+		llb.Args([]string{"/bin/sh", "-c", "chmod 777 /cache"}),
+		llb.WithCustomName("fix cache mount permissions"),
+		cacheMountOpt,
+	).Root()
 
 	// Phase: Analyzer
 	analyzerArgs := buildPhaseArgs(opts, "analyzer", perArchTag)
-	analyzerArgs = append(analyzerArgs[:1], append([]string{"-uid", fmt.Sprintf("%d", opts.BuilderUID), "-gid", fmt.Sprintf("%d", opts.BuilderGID)}, analyzerArgs[1:]...)...)
+	analyzerArgs = append(analyzerArgs[:1], append([]string{"-skip-chown", "-uid", fmt.Sprintf("%d", opts.BuilderUID), "-gid", fmt.Sprintf("%d", opts.BuilderGID)}, analyzerArgs[1:]...)...)
 	base = base.Run(
 		append([]llb.RunOption{
 			llb.Args(analyzerArgs),
 			llb.WithCustomName("lifecycle: analyzer"),
+			cacheMountOpt,
 			secretMountOpt,
 		}, envOpts...)...,
 	).Root()
@@ -299,14 +351,14 @@ func (b *LLBBackend) buildLLBState(opts PlatformBuildOpts, platform Platform, pe
 		}, envOpts...)...,
 	).Root()
 
-	// Phase: Restorer (no persistent cache in LLB backend)
+	// Phase: Restorer
 	restorerArgs := buildPhaseArgs(opts, "restorer", perArchTag)
-	restorerArgs = append(restorerArgs[:1], append([]string{"-uid", fmt.Sprintf("%d", opts.BuilderUID), "-gid", fmt.Sprintf("%d", opts.BuilderGID)}, restorerArgs[1:]...)...)
-	restorerArgs = removeCacheArgs(restorerArgs)
+	restorerArgs = append(restorerArgs[:1], append([]string{"-skip-chown", "-uid", fmt.Sprintf("%d", opts.BuilderUID), "-gid", fmt.Sprintf("%d", opts.BuilderGID)}, restorerArgs[1:]...)...)
 	base = base.Run(
 		append([]llb.RunOption{
 			llb.Args(restorerArgs),
 			llb.WithCustomName("lifecycle: restorer"),
+			cacheMountOpt,
 		}, envOpts...)...,
 	).Root()
 
@@ -319,14 +371,14 @@ func (b *LLBBackend) buildLLBState(opts PlatformBuildOpts, platform Platform, pe
 		}, envOpts...)...,
 	).Root()
 
-	// Phase: Exporter (needs registry auth, no persistent cache)
+	// Phase: Exporter (needs registry auth + cache)
 	exporterArgs := buildPhaseArgs(opts, "exporter", perArchTag)
-	exporterArgs = append(exporterArgs[:1], append([]string{"-uid", fmt.Sprintf("%d", opts.BuilderUID), "-gid", fmt.Sprintf("%d", opts.BuilderGID)}, exporterArgs[1:]...)...)
-	exporterArgs = removeCacheArgs(exporterArgs)
+	exporterArgs = append(exporterArgs[:1], append([]string{"-skip-chown", "-uid", fmt.Sprintf("%d", opts.BuilderUID), "-gid", fmt.Sprintf("%d", opts.BuilderGID)}, exporterArgs[1:]...)...)
 	base = base.Run(
 		append([]llb.RunOption{
 			llb.Args(exporterArgs),
 			llb.WithCustomName("lifecycle: exporter"),
+			cacheMountOpt,
 			secretMountOpt,
 		}, envOpts...)...,
 	).Root()

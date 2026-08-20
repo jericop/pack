@@ -5,11 +5,13 @@ import (
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"sort"
 	"strconv"
@@ -21,7 +23,9 @@ import (
 	"github.com/buildpacks/imgutil/layout"
 	"github.com/buildpacks/imgutil/local"
 	"github.com/buildpacks/imgutil/remote"
+	"github.com/buildpacks/lifecycle/auth"
 	"github.com/buildpacks/lifecycle/platform/files"
+	"github.com/google/go-containerregistry/pkg/authn"
 	"github.com/chainguard-dev/kaniko/pkg/util/proc"
 	"github.com/google/go-containerregistry/pkg/name"
 	"github.com/moby/moby/client"
@@ -949,7 +953,13 @@ func (c *Client) buildMultiPlatform(ctx context.Context, opts BuildOptions, life
 		BuildpackImages:  resolveBuildpackImages(opts),
 		OrderToml:        orderToml,
 		ClearCache:       opts.ClearCache,
+		RegistryAuth:     buildRegistryAuth(c.keychain, lifecycleOpts),
 		ExportMode:       multiplatform.ExportMode(opts.BuildkitExportMode),
+	}
+
+	// If the user explicitly passed --lifecycle-image, use it regardless of trust mode
+	if opts.LifecycleImage != "" {
+		platformBuildOpts.LifecycleImage = opts.LifecycleImage
 	}
 
 	// Create the backend
@@ -1058,22 +1068,127 @@ func generateBuildID() string {
 	return hex.EncodeToString(b)
 }
 
-// resolveDockerConfigPath returns the path to the Docker config.json file.
-func resolveDockerConfigPath() string {
-	// Check DOCKER_CONFIG env var first
-	if configDir := os.Getenv("DOCKER_CONFIG"); configDir != "" {
-		return filepath.Join(configDir, "config.json")
+// buildRegistryAuth resolves registry credentials from the keychain and returns the
+// CNB_REGISTRY_AUTH JSON value. This eliminates the need for docker config file mounts
+// inside buildkit — the lifecycle reads this env var directly.
+func buildRegistryAuth(keychain authn.Keychain, opts build.LifecycleOptions) string {
+	images := []string{opts.Image.String(), opts.RunImage}
+	if opts.CacheImage != "" {
+		images = append(images, opts.CacheImage)
 	}
-	// Default location
-	homeDir, err := os.UserHomeDir()
+	if opts.PreviousImage != "" {
+		images = append(images, opts.PreviousImage)
+	}
+	authVar, err := auth.BuildEnvVar(keychain, images...)
 	if err != nil {
 		return ""
 	}
-	configPath := filepath.Join(homeDir, ".docker", "config.json")
-	if _, err := os.Stat(configPath); err == nil {
+	return authVar
+}
+
+// resolveDockerConfigPath returns a path to a docker config.json file that contains
+// inline auth credentials. If the user's config uses a credential store (credsStore),
+// the credentials are extracted and written to a temporary config file that buildkit
+// can read without needing external credential helpers.
+func resolveDockerConfigPath() string {
+	configDir := os.Getenv("DOCKER_CONFIG")
+	if configDir == "" {
+		homeDir, err := os.UserHomeDir()
+		if err != nil {
+			return ""
+		}
+		configDir = filepath.Join(homeDir, ".docker")
+	}
+	configPath := filepath.Join(configDir, "config.json")
+	if _, err := os.Stat(configPath); err != nil {
+		return ""
+	}
+
+	// Check if the config uses a credential store
+	data, err := os.ReadFile(configPath)
+	if err != nil {
 		return configPath
 	}
-	return ""
+
+	var config map[string]interface{}
+	if err := json.Unmarshal(data, &config); err != nil {
+		return configPath
+	}
+
+	// If no credsStore, the config has inline auth — use it directly
+	credsStore, hasCredsStore := config["credsStore"]
+	if !hasCredsStore || credsStore == "" {
+		return configPath
+	}
+
+	// credsStore is set — extract credentials using the helper
+	helperName := fmt.Sprintf("docker-credential-%s", credsStore)
+	auths, ok := config["auths"].(map[string]interface{})
+	if !ok {
+		return configPath
+	}
+
+	resolvedAuths := map[string]interface{}{}
+	for registry := range auths {
+		creds, err := getCredentialsFromHelper(helperName, registry)
+		if err == nil && creds != "" {
+			resolvedAuths[registry] = map[string]string{"auth": creds}
+		}
+	}
+
+	if len(resolvedAuths) == 0 {
+		return configPath
+	}
+
+	// Write resolved credentials to a temp file
+	tmpConfig := map[string]interface{}{"auths": resolvedAuths}
+	tmpData, err := json.Marshal(tmpConfig)
+	if err != nil {
+		return configPath
+	}
+
+	tmpFile, err := os.CreateTemp("", "pack-docker-config-*.json")
+	if err != nil {
+		return configPath
+	}
+	if _, err := tmpFile.Write(tmpData); err != nil {
+		tmpFile.Close()
+		return configPath
+	}
+	tmpFile.Close()
+	return tmpFile.Name()
+}
+
+// getCredentialsFromHelper calls the docker credential helper to get auth for a registry.
+func getCredentialsFromHelper(helperName, registry string) (string, error) {
+	cmd := exec.Command(helperName, "get")
+	cmd.Stdin = strings.NewReader(registry)
+	output, err := cmd.Output()
+	if err != nil {
+		return "", err
+	}
+
+	var creds struct {
+		Username string `json:"Username"`
+		Secret   string `json:"Secret"`
+	}
+	if err := json.Unmarshal(output, &creds); err != nil {
+		return "", err
+	}
+
+	if creds.Username == "" || creds.Secret == "" {
+		return "", fmt.Errorf("empty credentials")
+	}
+
+	// Encode as base64 auth
+	auth := fmt.Sprintf("%s:%s", creds.Username, creds.Secret)
+	return fmt.Sprintf("%s", base64Encode(auth)), nil
+}
+
+func base64Encode(s string) string {
+	encoded := make([]byte, base64.StdEncoding.EncodedLen(len(s)))
+	base64.StdEncoding.Encode(encoded, []byte(s))
+	return string(encoded)
 }
 
 // negotiatePlatformAPI finds the latest platform API supported by both pack and the builder's lifecycle.

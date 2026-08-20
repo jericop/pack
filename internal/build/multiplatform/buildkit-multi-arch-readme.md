@@ -203,32 +203,34 @@ most use cases. It is faster and supports full caching.
 | Aspect | Dockerfile (default) | LLB |
 |--------|---------------------|-----|
 | Multi-platform parallelism | Yes (single buildx invocation) | Yes (parallel errgroup solves) |
-| Lifecycle buildpack cache | Yes (`--mount=type=cache,uid=1001`) | No (not supported) |
+| Lifecycle buildpack cache | Yes (`--mount=type=cache,uid=1001`) | Yes (with `-skip-chown` patched lifecycle) |
 | BuildKit layer cache | Yes (automatic) | Yes (automatic) |
-| Build speed on repeat builds | Fast (cached layers + lifecycle cache) | Slower (no lifecycle cache) |
-| Debuggable | Yes (Dockerfile is human-readable) | No intermediate artifact |
-| Reproducible externally | Yes (copy the Dockerfile) | No |
+| Build speed on repeat builds | Fast (cached layers + lifecycle cache) | Fast (with patched lifecycle; comparable to Dockerfile) |
+| Debuggable | Yes (Dockerfile is human-readable) | Equivalent Dockerfile logged in verbose mode |
+| Reproducible externally | Yes (copy the Dockerfile) | No intermediate artifact |
 | Registry-based cache (`--buildkit-cache-from/to`) | Yes | Yes |
+| Requires patched lifecycle | No | Yes (`-skip-chown` flag needed for cache mounts) |
 
-**Why LLB cannot use lifecycle cache mounts:**
 
-The lifecycle's restorer/exporter always attempt to `chown` the cache directory to the CNB user
-regardless of existing permissions. In buildkit's unprivileged execution environment, `chown`
-fails with "operation not permitted."
+**Why LLB requires a patched lifecycle for cache mounts:**
+
+The lifecycle's restorer/exporter always attempt to `chown` the cache directory to the CNB user.
+In buildkit's unprivileged execution environment, `chown` fails with "operation not permitted."
 
 The Dockerfile frontend works around this because it handles cache mount uid/gid at the
 *solver level* via an internal step (`[internal] setting cache mount permissions`) that
-pre-creates the mount with the correct ownership using kernel-level mount options — not a
+pre-creates the mount with the correct ownership using kernel-level mount options - not a
 userspace `chown`. This capability is specific to the Dockerfile frontend and is not exposed
-through the raw LLB API. The `llb.AsPersistentCacheDir` function does not accept uid/gid
-parameters, and `llb.Mkdir` with `llb.WithUIDGID` on the source state does not propagate
-ownership to the actual mount point because the persistent cache volume's root directory
-ownership is managed by buildkit's snapshot driver, not by the LLB layer.
+through the raw LLB API.
 
-Until either:
-1. The buildkit LLB API exposes uid/gid on cache mounts, or
-2. The lifecycle adds an option to skip the chown of the cache directory
+The fix: the lifecycle's `-skip-chown` flag (added in the POC at
+https://github.com/jericop/cnb-lifecycle/tree/skip-chown\) tells the analyzer, restorer, and
+exporter to skip the `EnsureOwner` chown call. The LLB backend passes this flag automatically
+and uses a setup step (`chmod 777 /cache` with the cache mount attached) to ensure the cache
+directory is writable by the CNB user.
 
+Once a builder includes a lifecycle with `-skip-chown` support, the `--lifecycle-image` flag
+will no longer be needed.
 ...the LLB backend cannot use persistent lifecycle cache mounts.
 
 ### Using a Remote BuildKit Daemon (CI)
@@ -258,6 +260,39 @@ For the LLB backend with a remote daemon, the connection is resolved from the bu
 container name (`buildx_buildkit_<builder-name>0`). Remote builders use a TCP endpoint
 directly. The LLB backend currently supports `docker-container` driver builders; remote
 driver support is planned.
+
+### LLB Backend with Patched Lifecycle (`-skip-chown`)
+
+The LLB backend requires a patched lifecycle that supports the `-skip-chown` flag to enable
+persistent cache mounts. A POC lifecycle image is available at:
+
+```
+jericop/lifecycle:skip-chown-poc
+```
+
+This image contains a lifecycle binary with the `-skip-chown` flag added to the analyzer,
+restorer, and exporter. When this flag is passed, the lifecycle skips the `chown` of volume
+directories that fails in BuildKit's unprivileged execution mode.
+
+```bash
+pack build registry.example.com/myapp:latest \
+  --path ./app \
+  --builder paketobuildpacks/ubuntu-noble-builder:latest \
+  --run-image paketobuildpacks/ubuntu-noble-run-tiny:latest \
+  --lifecycle-image jericop/lifecycle:skip-chown-poc \
+  --platforms linux/amd64,linux/arm64 \
+  --buildkit \
+  --publish \
+  --trust-builder \
+  --buildkit-builder pack-multiplatform \
+  --build-backend buildkit-llb
+```
+
+The patched lifecycle source is at: https://github.com/jericop/cnb-lifecycle/tree/skip-chown
+
+Once a builder ships with a lifecycle that includes `-skip-chown` support, the
+`--lifecycle-image` flag will no longer be needed and the LLB backend will use
+the builder's built-in lifecycle automatically.
 
 ### OCI Layout Export Mode (Not Yet Functional)
 

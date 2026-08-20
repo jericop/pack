@@ -170,6 +170,11 @@ type PlatformBuildOpts struct {
 	// and lifecycle buildpack cache (skip the cache mount).
 	ClearCache bool
 
+	// RegistryAuth is the JSON value for CNB_REGISTRY_AUTH environment variable.
+	// Contains pre-resolved auth headers for registries, eliminating the need for
+	// docker config file mounts inside buildkit.
+	RegistryAuth string
+
 	// ExportMode controls whether the lifecycle pushes to a registry or writes OCI layout to disk.
 	ExportMode ExportMode
 }

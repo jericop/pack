@@ -141,11 +141,6 @@ func (b *DockerfileBackend) buildBuildxArgs(opts PlatformBuildOpts, dockerfilePa
 		args = append(args, "--output", "type=cacheonly")
 	}
 
-	// Secret for registry credentials
-	if opts.DockerConfigPath != "" {
-		args = append(args, "--secret", fmt.Sprintf("id=docker-config,src=%s", opts.DockerConfigPath))
-	}
-
 	// External cache configuration
 	for _, cacheFrom := range b.buildkitOpts.CacheFrom {
 		args = append(args, "--cache-from", cacheFrom)
