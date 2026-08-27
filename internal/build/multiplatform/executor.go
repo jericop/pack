@@ -12,8 +12,9 @@ import (
 // Executor orchestrates multi-platform builds by dispatching per-platform
 // builds to a BuildBackend and then assembling the results into a manifest list.
 type Executor struct {
-	backend BuildBackend
-	logger  logging.Logger
+	backend   BuildBackend
+	assembler ManifestAssembler
+	logger    logging.Logger
 }
 
 // MultiPlatformBuilder is an optional interface that backends can implement
@@ -24,18 +25,21 @@ type MultiPlatformBuilder interface {
 	BuildMultiPlatform(ctx context.Context, platforms []Platform, opts PlatformBuildOpts) ([]PlatformBuildResult, error)
 }
 
-// NewExecutor creates a new multi-platform build executor with the given backend.
-func NewExecutor(backend BuildBackend, logger logging.Logger) *Executor {
+// NewExecutor creates a new multi-platform build executor with the given backend
+// and manifest assembler. The assembler uses pack's built-in manifest list support
+// (imgutil + go-containerregistry) to create and push the final image index.
+func NewExecutor(backend BuildBackend, assembler ManifestAssembler, logger logging.Logger) *Executor {
 	return &Executor{
-		backend: backend,
-		logger:  logger,
+		backend:   backend,
+		assembler: assembler,
+		logger:    logger,
 	}
 }
 
 // Execute runs the lifecycle for all specified platforms and assembles the results.
 // If the backend supports it, a single multi-platform invocation is used and buildkit
 // pushes the manifest list directly. Otherwise, builds run sequentially and the
-// manifest list is assembled afterwards.
+// manifest list is assembled afterwards using pack's built-in manifest list functionality.
 func (e *Executor) Execute(ctx context.Context, opts MultiPlatformBuildOpts) ([]PlatformBuildResult, error) {
 	e.logger.Infof("Building for %d platform(s) using %s backend", len(opts.Platforms), e.backend.Name())
 
@@ -56,16 +60,13 @@ func (e *Executor) Execute(ctx context.Context, opts MultiPlatformBuildOpts) ([]
 			return nil, fmt.Errorf("oci-layout export mode is not yet fully implemented; use --buildkit-export-mode=registry")
 		}
 
-		// Registry mode: assemble from per-arch tags using imagetools
-		perArchRefs := make([]PlatformBuildResult, len(opts.Platforms))
+		// Registry mode: assemble from per-arch tags using pack's manifest list support
+		perArchRefs := make([]string, len(opts.Platforms))
 		for i, p := range opts.Platforms {
-			perArchRefs[i] = PlatformBuildResult{
-				Platform: p,
-				ImageRef: fmt.Sprintf("%s-build-%s-%s", opts.ManifestListName, opts.BuildOpts.BuildID, p.Arch),
-			}
+			perArchRefs[i] = fmt.Sprintf("%s-build-%s-%s", opts.ManifestListName, opts.BuildOpts.BuildID, p.Arch)
 		}
 
-		if err := assembleManifestListViaDocker(ctx, opts.ManifestListName, perArchRefs, e.logger); err != nil {
+		if err := e.assembler.AssembleAndPushManifest(ctx, opts.ManifestListName, perArchRefs); err != nil {
 			return nil, fmt.Errorf("assembling manifest list: %w", err)
 		}
 
@@ -146,33 +147,4 @@ func (e *Executor) platformOptsForMulti(opts MultiPlatformBuildOpts) PlatformBui
 	buildOpts := opts.BuildOpts
 	buildOpts.ImageName = opts.ManifestListName
 	return buildOpts
-}
-
-// assembleManifestList creates a manifest list from per-platform build results.
-// Only needed for the sequential build path; single-invocation builds handle this internally.
-func (e *Executor) assembleManifestList(ctx context.Context, opts MultiPlatformBuildOpts, results []PlatformBuildResult) error {
-	if !opts.Publish {
-		e.logger.Info("Manifest list assembly for local OCI layout is not yet implemented; per-arch images are available in the output directory")
-		return nil
-	}
-
-	return assembleManifestListViaDocker(ctx, opts.ManifestListName, results, e.logger)
-}
-
-// assembleManifestListViaDocker creates a manifest list using `docker buildx imagetools create`.
-func assembleManifestListViaDocker(ctx context.Context, manifestListName string, results []PlatformBuildResult, logger logging.Logger) error {
-	sources := make([]string, 0, len(results))
-	for _, r := range results {
-		if r.ImageRef == "" {
-			return fmt.Errorf("missing image reference for platform %s", r.Platform.String())
-		}
-		sources = append(sources, r.ImageRef)
-	}
-
-	logger.Debugf("Creating manifest list %s from: %v", manifestListName, sources)
-
-	args := []string{"buildx", "imagetools", "create", "--tag", manifestListName}
-	args = append(args, sources...)
-
-	return runDockerCommand(ctx, args, logger)
 }

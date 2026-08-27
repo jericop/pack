@@ -31,7 +31,8 @@ pack build --buildkit --platforms linux/amd64,linux/arm64 --publish ...
 │                                               │
 │  1. Check existing tag policy                 │
 │  2. Dispatch to backend.BuildMultiPlatform()  │
-│  3. Assemble manifest list from digests       │
+│  3. Assemble manifest list via pack's         │
+│     built-in manifest support (imgutil)       │
 └───────────────────┬───────────────────────────┘
                     │
                     ▼
@@ -134,7 +135,10 @@ RUN --mount=type=cache,id=<cache-id>-${TARGETARCH},target=/cache,uid=1001,gid=10
    the env var is set at build time in the Dockerfile and not persisted in the output image.
 
 6. **Manifest list assembly**: After the lifecycle exports per-arch images, pack assembles them
-   into a manifest list using `docker buildx imagetools create` with digest references.
+   into a manifest list using its built-in manifest list functionality (imgutil +
+   go-containerregistry). This fetches each per-arch image from the registry by reference,
+   creates an OCI image index, and pushes it atomically — no dependency on `docker buildx
+   imagetools` for this step.
 
 ## Usage
 

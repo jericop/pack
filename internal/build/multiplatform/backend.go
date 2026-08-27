@@ -221,6 +221,16 @@ type BuildBackend interface {
 	Capabilities() BackendCapabilities
 }
 
+// ManifestAssembler creates a manifest list (image index) from per-architecture
+// image references and pushes it to a registry. This uses pack's built-in manifest
+// list functionality (imgutil + go-containerregistry) rather than shelling out to
+// external tools like `docker buildx imagetools create`.
+type ManifestAssembler interface {
+	// AssembleAndPushManifest creates a manifest list at manifestListName by fetching
+	// the per-architecture images from the registry and pushing the assembled index.
+	AssembleAndPushManifest(ctx context.Context, manifestListName string, perArchRefs []string) error
+}
+
 // BuildkitOpts holds configuration specific to BuildKit backends.
 type BuildkitOpts struct {
 	// Builder is the name of the buildx builder to use (empty = default).
