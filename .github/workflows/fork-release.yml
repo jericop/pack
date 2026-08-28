@@ -2,37 +2,38 @@
 #
 # A slim, Linux-only alternative to the upstream `build.yml` for cutting
 # experimental fork releases without spending macOS/Windows runner minutes.
-# It runs unit tests on Linux, builds the linux/amd64 + linux/arm64 pack
-# binaries, and creates a DRAFT GitHub Release (marked prerelease) in this repo
-# with the .tgz artifacts attached.
 #
-# The GitHub release and the Docker image are published in two separate MANUAL
+# TAG-DRIVEN: push an annotated tag `v<version>` (e.g. v0.0.1-buildkit-poc) and
+# this workflow runs the unit tests, builds the linux/amd64 + linux/arm64 pack
+# binaries, and creates a DRAFT GitHub Release AT THAT TAG with the .tgz
+# artifacts attached. Because the tag already exists (you pushed it), the
+# release tag, the git tag, and the Docker image tag all line up:
+#
+#     git tag                v0.0.1-buildkit-poc
+#     GitHub release tag     v0.0.1-buildkit-poc
+#     docker image tag       docker.io/${DOCKERHUB_ORG}/pack:0.0.1-buildkit-poc
+#
+# Publishing the release and pushing the Docker image are two separate MANUAL
 # steps (see .kiro/steering/fork-release-process.md):
-#   1. Publish the draft release in the GitHub UI (makes the release + artifacts
-#      public). Because the draft is a prerelease, publishing does NOT emit the
-#      `released` event, so it does not auto-trigger delivery-docker.yml.
+#   1. Publish the draft release in the GitHub UI (makes it + artifacts public).
 #   2. Run `delivery-docker.yml` manually (workflow_dispatch, tag_name=v<version>)
-#      to build + push the multi-arch image to docker.io/${DOCKERHUB_ORG}/pack.
+#      to build + push the multi-arch image. The git tag already exists, so its
+#      "checkout at tag" step resolves correctly.
 #
 # The unit job runs `make unit` (go test ./...). The BuildKit/registry
 # integration tests (oci_layout_*_integration_test.go) are gated behind
 # PACK_TEST_BUILDKIT_ENABLED / PACK_TEST_REGISTRY_ENABLED, which are NOT set
-# here, so they SKIP — no custom buildkit builder or local registry is used.
-#
-# Triggered by pushing a branch named `release/<version>` (the version is
-# derived from the branch name, matching upstream's convention) or manually via
-# workflow_dispatch. The other upstream workflows are disabled for this fork;
-# see .kiro/steering/fork-release-process.md.
+# here, so they SKIP. Run those via the separate `fork-integration.yml` workflow.
 name: fork-release
 
 on:
   push:
-    branches:
-      - 'release/**'
+    tags:
+      - 'v*'
   workflow_dispatch:
     inputs:
       version:
-        description: 'Release version (without leading v), e.g. 0.0.1-buildkit-poc'
+        description: 'Release version WITHOUT leading v, e.g. 0.0.1-buildkit-poc. NOTE: workflow_dispatch does not create the git tag; prefer pushing a v<version> tag so delivery-docker can check it out.'
         required: true
 
 jobs:
@@ -74,12 +75,14 @@ jobs:
         shell: bash
         run: |
           if [ -n "${{ github.event.inputs.version }}" ]; then
+            # workflow_dispatch: version supplied without leading v.
             version="${{ github.event.inputs.version }}"
-          else
-            [[ $GITHUB_REF =~ ^refs\/heads\/release\/(.*)$ ]] && version=${BASH_REMATCH[1]}
+          elif [[ "$GITHUB_REF" =~ ^refs/tags/v(.*)$ ]]; then
+            # tag push: strip refs/tags/v prefix.
+            version="${BASH_REMATCH[1]}"
           fi
           if [[ -z "${version}" ]]; then
-            echo "ERROR: pack version not detected (expected a release/<version> branch or a workflow_dispatch version input)."
+            echo "ERROR: pack version not detected (expected a v<version> tag push or a workflow_dispatch version input)."
             exit 1
           fi
           echo "PACK_VERSION=${version}" >> $GITHUB_ENV
@@ -122,11 +125,15 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
-          target_commitish: ${{ github.sha }}
+          # Reuse the pushed tag as-is on a tag push; fall back to a v-prefixed
+          # tag name for the workflow_dispatch path.
           tag_name: v${{ env.PACK_VERSION }}
           name: pack v${{ env.PACK_VERSION }}
           draft: true
-          prerelease: true
+          # Not a prerelease: keeps the release tag == git tag == docker tag and
+          # avoids the prerelease/`released`-event confusion. It stays a DRAFT
+          # until you publish it manually.
+          prerelease: false
           files: pack-v${{ env.PACK_VERSION }}-*
           body: |
             ## Experimental fork build (jericop/pack)
@@ -135,10 +142,10 @@ jobs:
             containing the BuildKit LLB OCI-layout multi-arch work. It is NOT an
             official Cloud Native Buildpacks release.
 
-            Linux binaries only (amd64, arm64). The multi-arch Docker image is
-            published to Docker Hub (org `jericop` by default, configurable via
-            the `DOCKERHUB_ORG` repo variable) when this release is published
-            (see `delivery-docker.yml`).
+            Linux binaries only (amd64, arm64). The multi-arch Docker image
+            `docker.io/jericop/pack:${{ env.PACK_VERSION }}` (org configurable via
+            the `DOCKERHUB_ORG` repo variable) is published separately by running
+            the `delivery / docker` workflow with `tag_name: v${{ env.PACK_VERSION }}`.
 
             ### Install (Linux)
 

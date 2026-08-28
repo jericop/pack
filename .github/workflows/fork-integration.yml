@@ -1,0 +1,158 @@
+# Fork BuildKit integration tests (jericop/pack).
+#
+# Runs the OCI-layout BuildKit integration tests that are gated OFF by default in
+# the normal unit/release runs. They require a real docker-container buildx
+# builder (with the patched lifecycle bundled in the builder image) and, for the
+# Tier 3 registry test, a registry to push to.
+#
+# For the registry test we use the ttl.sh EPHEMERAL, ANONYMOUS registry
+# (https://ttl.sh). This keeps things simple with NO code changes:
+#   - ttl.sh is a real HTTPS registry, so go-containerregistry's default (secure)
+#     transport works — no insecure/plaintext handling needed.
+#   - It needs no auth (anonymous push/pull), so the existing DefaultKeychain
+#     path pack already uses works as-is.
+#   - Images auto-expire (we push with a short TTL), so there is nothing to clean
+#     up and no local registry/network to stand up.
+#
+# In multi-arch OCI-layout mode the manifest-list assembly + push is done
+# HOST-SIDE via go-containerregistry (remote.WriteIndex), so only the runner
+# needs to reach ttl.sh (it does, over the public internet); the docker-container
+# builder just produces the on-disk per-arch layouts. Hence no special builder
+# networking is required.
+#
+# MANUAL-ONLY (workflow_dispatch) to keep it out of the release path and easy to
+# troubleshoot in isolation. See .kiro/steering/fork-release-process.md.
+#
+# Tests run (internal/build/multiplatform):
+#   - TestOCILayoutOnDiskIntegration   (Tier 2, no registry) — PACK_TEST_BUILDKIT_ENABLED
+#   - TestOCILayoutParityIntegration   (Tier 2, no registry) — PACK_TEST_BUILDKIT_ENABLED
+#   - TestOCILayoutRebaseIntegration   (Tier 2, no registry) — PACK_TEST_BUILDKIT_ENABLED
+#   - TestOCILayoutRegistryIntegration (Tier 3, ttl.sh)       — PACK_TEST_REGISTRY_ENABLED
+name: fork-integration
+
+on:
+  workflow_dispatch:
+    inputs:
+      builder_image:
+        description: 'Multi-arch builder image bundling the patched lifecycle'
+        required: true
+        default: 'jericop/ubuntu-noble-builder:skip-chown-poc'
+      platforms:
+        description: 'Comma-separated platforms to build'
+        required: false
+        default: 'linux/amd64,linux/arm64'
+      run_registry_test:
+        description: 'Also run the Tier 3 registry integration test (pushes to ttl.sh)'
+        required: false
+        type: boolean
+        default: true
+      registry_base:
+        description: 'Registry base for the Tier 3 test (default ttl.sh). Image ref is <base>/<unique>:<ttl>.'
+        required: false
+        default: 'ttl.sh'
+      ttl:
+        description: 'ttl.sh image lifetime (e.g. 24h, 12h, 30m). ttl.sh max is 24h. Ignored for non-ttl.sh registries.'
+        required: false
+        default: '24h'
+
+env:
+  BUILDER_NAME: pack-multiplatform
+  # Sample app: paketo-buildpacks/samples, the go/no-imports app.
+  SAMPLES_REPO: https://github.com/paketo-buildpacks/samples
+  SAMPLE_APP_SUBDIR: go/no-imports
+
+jobs:
+  integration:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up go
+        uses: actions/setup-go@v6
+        with:
+          check-latest: true
+          go-version-file: 'go.mod'
+
+      - name: Set up go env
+        run: |
+          echo "GOPATH=$(go env GOPATH)" >> $GITHUB_ENV
+          echo "$(go env GOPATH)/bin" >> $GITHUB_PATH
+        shell: bash
+
+      - name: Set up QEMU (multi-arch emulation)
+        uses: docker/setup-qemu-action@v3
+
+      - name: Create docker-container buildx builder
+        run: |
+          docker buildx create \
+            --name "${BUILDER_NAME}" \
+            --driver docker-container \
+            --bootstrap
+          docker buildx inspect "${BUILDER_NAME}"
+
+      - name: Fetch sample app (paketo-buildpacks/samples: go/no-imports)
+        id: sample
+        run: |
+          set -euo pipefail
+          git clone --depth 1 "${SAMPLES_REPO}" "${RUNNER_TEMP}/samples"
+          app_path="${RUNNER_TEMP}/samples/${SAMPLE_APP_SUBDIR}"
+          if [[ ! -d "${app_path}" ]]; then
+            echo "ERROR: sample app path not found: ${app_path}"
+            exit 1
+          fi
+          echo "app_path=${app_path}" >> "$GITHUB_OUTPUT"
+          echo "Using sample app at ${app_path}"
+          ls -la "${app_path}"
+
+      - name: Compute ttl.sh image ref
+        id: ref
+        run: |
+          set -euo pipefail
+          base="${{ github.event.inputs.registry_base }}"
+          ttl="${{ github.event.inputs.ttl }}"
+          # Unique, non-guessable-ish name per run so runs never collide.
+          uniq="jericop-pack-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          if [[ "${base}" == "ttl.sh" ]]; then
+            ref="${base}/${uniq}:${ttl}"
+          else
+            ref="${base}/${uniq}:latest"
+          fi
+          echo "registry_ref=${ref}" >> "$GITHUB_OUTPUT"
+          echo "Tier 3 registry ref: ${ref}"
+
+      - name: Run Tier 2 on-disk integration tests (no registry)
+        env:
+          PACK_TEST_BUILDKIT_ENABLED: '1'
+          PACK_TEST_BUILDKIT_BUILDER: ${{ env.BUILDER_NAME }}
+          PACK_TEST_BUILDER_IMAGE: ${{ github.event.inputs.builder_image }}
+          PACK_TEST_APP_PATH: ${{ steps.sample.outputs.app_path }}
+          PACK_TEST_PLATFORMS: ${{ github.event.inputs.platforms }}
+        run: |
+          go test -v -count=1 -timeout=30m ./internal/build/multiplatform/ \
+            -run 'TestOCILayoutOnDiskIntegration|TestOCILayoutParityIntegration|TestOCILayoutRebaseIntegration'
+
+      - name: Run Tier 3 registry integration test (ttl.sh)
+        if: ${{ github.event.inputs.run_registry_test == 'true' }}
+        env:
+          PACK_TEST_REGISTRY_ENABLED: '1'
+          PACK_TEST_REGISTRY_REF: ${{ steps.ref.outputs.registry_ref }}
+          PACK_TEST_BUILDKIT_BUILDER: ${{ env.BUILDER_NAME }}
+          PACK_TEST_BUILDER_IMAGE: ${{ github.event.inputs.builder_image }}
+          PACK_TEST_APP_PATH: ${{ steps.sample.outputs.app_path }}
+          PACK_TEST_PLATFORMS: ${{ github.event.inputs.platforms }}
+        run: |
+          go test -v -count=1 -timeout=30m ./internal/build/multiplatform/ \
+            -run 'TestOCILayoutRegistryIntegration'
+
+      - name: Dump builder logs on failure
+        if: failure()
+        run: |
+          echo "===== buildx inspect ====="
+          docker buildx inspect "${BUILDER_NAME}" || true
+          echo "===== buildkit container logs ====="
+          docker logs "buildx_buildkit_${BUILDER_NAME}0" 2>&1 | tail -200 || true
+
+      - name: Tear down
+        if: always()
+        run: |
+          docker buildx rm "${BUILDER_NAME}" || true
