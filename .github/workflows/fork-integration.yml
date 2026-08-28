@@ -46,7 +46,7 @@ on:
       builder_image:
         description: 'Multi-arch builder image bundling the patched lifecycle'
         required: true
-        default: 'jericop/ubuntu-noble-builder:skip-chown-poc'
+        default: 'jericop/ubuntu-noble-builder:buildkit-multi-arch-poc'
       platforms:
         description: 'Comma-separated platforms to build'
         required: false
@@ -72,7 +72,7 @@ env:
   SAMPLE_APP_SUBDIR: go/no-imports
   # Defaults used when the workflow runs on `push` (no workflow_dispatch inputs).
   # workflow_dispatch inputs override these via `${{ github.event.inputs.X || env.DEFAULT_X }}`.
-  DEFAULT_BUILDER_IMAGE: 'jericop/ubuntu-noble-builder:skip-chown-poc'
+  DEFAULT_BUILDER_IMAGE: 'jericop/ubuntu-noble-builder:buildkit-multi-arch-poc'
   DEFAULT_PLATFORMS: 'linux/amd64,linux/arm64'
   DEFAULT_RUN_REGISTRY_TEST: 'true'
   DEFAULT_REGISTRY_BASE: 'ttl.sh'

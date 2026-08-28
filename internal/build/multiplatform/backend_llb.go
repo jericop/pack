@@ -837,12 +837,13 @@ func buildPhaseArgs(opts PlatformBuildOpts, phaseName string, perArchTag string)
 // Flag rules (see FR-3):
 //   - analyzer, restorer, exporter get -skip-chown -uid -gid (unprivileged BuildKit).
 //   - In OCI layout mode:
-//   - analyzer gets -layout -layout-dir /output. The run image is supplied by
-//     the analyzer's own phase command (-run-image <ref>, from pack's
-//     --run-image), exactly as the Dockerfile backend does
-//     (convertToOCILayoutArgs). NOTE: this lifecycle build does NOT support a
-//     -pull-run-image flag, so we must not add it — the analyzer reads the run
-//     image from -run-image instead.
+//   - analyzer gets -layout -layout-dir /output -pull-run-image. Inside BuildKit
+//     pack cannot pre-populate the run image into the layout dir, so
+//     -pull-run-image tells the lifecycle to pull the run image (named by the
+//     analyzer's -run-image arg) into /output itself, so the exporter can
+//     resolve it. This requires a lifecycle that defines -pull-run-image
+//     (jericop/lifecycle:buildkit-multi-arch-support and later); the older
+//     skip-chown-poc lifecycle does NOT have it.
 //   - exporter gets -layout -layout-dir /output so the exported image lands in
 //     /output as the Phase 1 subject of the two-phase solve.
 func buildLifecyclePhaseArgs(opts PlatformBuildOpts, phaseName string, perArchTag string) []string {
@@ -865,11 +866,12 @@ func buildLifecyclePhaseArgs(opts PlatformBuildOpts, phaseName string, perArchTa
 	if opts.ExportMode == ExportOCILayout {
 		switch phaseName {
 		case "analyzer":
-			// Write the analyzed image to the /output layout. The run image comes
-			// from the analyzer's -run-image arg (supplied by the phase command),
-			// matching the Dockerfile backend. This lifecycle has no
-			// -pull-run-image flag, so we must not add one.
-			args = insertAfterBinary(args, "-layout", "-layout-dir", "/output")
+			// Write to the /output layout AND pull the run image into it. In
+			// BuildKit pack can't pre-populate the run image, so -pull-run-image
+			// makes the lifecycle pull it (named by -run-image in the phase
+			// command) into /output so the exporter can resolve it. Requires a
+			// lifecycle that defines -pull-run-image.
+			args = insertAfterBinary(args, "-layout", "-layout-dir", "/output", "-pull-run-image")
 		case "exporter":
 			// Write the complete OCI image to /output (Phase 1 export subject).
 			args = insertAfterBinary(args, "-layout", "-layout-dir", "/output")

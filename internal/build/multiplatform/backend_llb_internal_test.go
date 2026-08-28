@@ -113,13 +113,14 @@ func testLLBBackendInternal(t *testing.T, when spec.G, it spec.S) {
 				baseOpts.ExportMode = ExportOCILayout
 			})
 
-			it("configures the analyzer with -layout -layout-dir /output and -skip-chown (no -pull-run-image)", func() {
-				// The run image is supplied by the analyzer's own -run-image arg
-				// (pack --run-image), matching the Dockerfile backend. This
-				// lifecycle has no -pull-run-image flag, so it must NOT be added.
+			it("configures the analyzer with -layout -layout-dir /output -pull-run-image and -skip-chown", func() {
+				// In BuildKit pack can't pre-populate the run image into the layout
+				// dir, so -pull-run-image tells the lifecycle to pull it (named by
+				// -run-image) into /output so the exporter can resolve it. Requires
+				// a lifecycle that defines -pull-run-image
+				// (jericop/lifecycle:buildkit-multi-arch-support+).
 				args := buildLifecyclePhaseArgs(baseOpts, "analyzer", perArchTag)
-				h.AssertSliceContains(t, args, "-layout", "-layout-dir", "/output", "-skip-chown")
-				h.AssertSliceNotContains(t, args, "-pull-run-image")
+				h.AssertSliceContains(t, args, "-layout", "-layout-dir", "/output", "-pull-run-image", "-skip-chown")
 			})
 
 			it("configures the exporter with -layout -layout-dir /output and -skip-chown", func() {
@@ -127,14 +128,12 @@ func testLLBBackendInternal(t *testing.T, when spec.G, it spec.S) {
 				h.AssertSliceContains(t, args, "-layout", "-layout-dir", "/output", "-skip-chown")
 			})
 
-			it("never adds -pull-run-image to any lifecycle phase (this lifecycle has no such flag)", func() {
-				// The patched lifecycle bundled in the builder image does not
-				// define -pull-run-image (it errors "flag provided but not
-				// defined"). The run image must instead be provided via the
-				// analyzer's -run-image arg, exactly as the Dockerfile backend
-				// (convertToOCILayoutArgs) does. Lock in that NO phase carries
-				// -pull-run-image.
-				for _, phase := range []string{"analyzer", "detector", "restorer", "builder", "exporter"} {
+			it("puts -pull-run-image on the analyzer only (not any other phase)", func() {
+				// Only the analyzer pulls the run image into the layout dir. Lock
+				// in that exactly the analyzer carries -pull-run-image and no other
+				// lifecycle phase does.
+				h.AssertSliceContains(t, buildLifecyclePhaseArgs(baseOpts, "analyzer", perArchTag), "-pull-run-image")
+				for _, phase := range []string{"detector", "restorer", "builder", "exporter"} {
 					h.AssertSliceNotContains(t, buildLifecyclePhaseArgs(baseOpts, phase, perArchTag), "-pull-run-image")
 				}
 			})
