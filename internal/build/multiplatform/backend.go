@@ -276,7 +276,6 @@ type MultiPlatformBuildOpts struct {
 	// Publish indicates whether to push the final manifest list to a registry.
 	Publish bool
 
-
 	// ExportMode controls how per-arch images are produced.
 	// "registry" (default): lifecycle pushes per-arch images to registry tags, then manifest list is assembled.
 	// "oci-layout": lifecycle exports to OCI layout on disk, pack assembles and pushes atomically (no temp tags).
@@ -294,4 +293,3 @@ const (
 	// the manifest list and pushes atomically using go-containerregistry.
 	ExportOCILayout ExportMode = "oci-layout"
 )
-

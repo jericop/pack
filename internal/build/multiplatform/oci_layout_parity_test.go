@@ -72,9 +72,9 @@ func testOCILayoutParity(t *testing.T, when spec.G, it spec.S) {
 			workingDir: "/workspace",
 			ports:      map[string]struct{}{"8080/tcp": {}},
 			labels: map[string]string{
-				"io.buildpacks.stack.id":           "io.buildpacks.stacks.jammy",
-				"io.buildpacks.project.metadata":   `{"source":{"type":"git"}}`,
-				"io.buildpacks.builder.metadata":   `{"buildpacks":[]}`,
+				"io.buildpacks.stack.id":         "io.buildpacks.stacks.jammy",
+				"io.buildpacks.project.metadata": `{"source":{"type":"git"}}`,
+				"io.buildpacks.builder.metadata": `{"buildpacks":[]}`,
 			},
 			appSHA:      "sha256:1111111111111111111111111111111111111111111111111111111111111111",
 			configSHA:   "sha256:2222222222222222222222222222222222222222222222222222222222222222",

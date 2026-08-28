@@ -1,8 +1,8 @@
 package multiplatform
 
 import (
-"fmt"
-"strings"
+	"fmt"
+	"strings"
 )
 
 func GenerateDockerfileMultiPlatform(opts PlatformBuildOpts) string {

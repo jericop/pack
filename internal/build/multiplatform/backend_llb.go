@@ -13,8 +13,8 @@ import (
 	contentlocal "github.com/containerd/containerd/v2/plugins/content/local"
 	"github.com/docker/cli/cli/config"
 	"github.com/moby/buildkit/client"
-	"github.com/moby/buildkit/client/llb"
 	_ "github.com/moby/buildkit/client/connhelper/dockercontainer" // register docker-container:// scheme
+	"github.com/moby/buildkit/client/llb"
 	"github.com/moby/buildkit/session"
 	"github.com/moby/buildkit/session/auth/authprovider"
 	ocispecs "github.com/opencontainers/image-spec/specs-go/v1"
@@ -656,9 +656,9 @@ func (b *LLBBackend) buildLLBState(opts PlatformBuildOpts, platform Platform, pe
 	appSource := llb.Local("context")
 	base = base.File(
 		llb.Copy(appSource, "/", "/workspace", &llb.CopyInfo{
-			CreateDestPath:      true,
-			AllowWildcard:       true,
-			AllowEmptyWildcard:  true,
+			CreateDestPath:     true,
+			AllowWildcard:      true,
+			AllowEmptyWildcard: true,
 		}),
 		llb.WithCustomName("copy app source"),
 	)
