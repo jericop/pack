@@ -975,7 +975,7 @@ func (c *Client) buildMultiPlatform(ctx context.Context, opts BuildOptions, life
 	}
 
 	// Create and run the multi-platform executor
-	executor := multiplatform.NewExecutor(backend, c, c.logger)
+	executor := multiplatform.NewExecutor(backend, c.logger)
 
 	multiOpts := multiplatform.MultiPlatformBuildOpts{
 		Platforms:         platforms,

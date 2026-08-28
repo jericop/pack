@@ -31,8 +31,7 @@ pack build --buildkit --platforms linux/amd64,linux/arm64 --publish ...
 │                                               │
 │  1. Check existing tag policy                 │
 │  2. Dispatch to backend.BuildMultiPlatform()  │
-│  3. Assemble manifest list via pack's         │
-│     built-in manifest support (imgutil)       │
+│  3. Assemble manifest list from digests       │
 └───────────────────┬───────────────────────────┘
                     │
                     ▼
@@ -135,10 +134,7 @@ RUN --mount=type=cache,id=<cache-id>-${TARGETARCH},target=/cache,uid=1001,gid=10
    the env var is set at build time in the Dockerfile and not persisted in the output image.
 
 6. **Manifest list assembly**: After the lifecycle exports per-arch images, pack assembles them
-   into a manifest list using its built-in manifest list functionality (imgutil +
-   go-containerregistry). This fetches each per-arch image from the registry by reference,
-   creates an OCI image index, and pushes it atomically — no dependency on `docker buildx
-   imagetools` for this step.
+   into a manifest list using `docker buildx imagetools create` with digest references.
 
 ## Usage
 
@@ -298,17 +294,55 @@ Once a builder ships with a lifecycle that includes `-skip-chown` support, the
 `--lifecycle-image` flag will no longer be needed and the LLB backend will use
 the builder's built-in lifecycle automatically.
 
-### OCI Layout Export Mode (Not Yet Functional)
+### OCI Layout Export Mode (LLB Backend — Functional, Experimental)
 
-There is initial code for an `oci-layout` export mode (`--buildkit-export-mode=oci-layout`) that
-would avoid creating intermediate per-arch tags entirely. In this mode, the lifecycle would export
-to local OCI layout on disk, and pack would assemble the manifest list using `go-containerregistry`
-and push atomically.
+The `oci-layout` export mode (`--buildkit-export-mode=oci-layout`) eliminates intermediate
+per-arch registry tags entirely. It is **functional but experimental**, and only for the
+**LLB backend** (`--build-backend=buildkit-llb`). The Dockerfile backend does not implement
+this mode; it remains an MVP that uses registry mode with intermediate tags (see below).
 
-This mode is **not yet functional** because the lifecycle's `-layout` flag requires the run image
-to be pre-populated in the layout directory before the analyzer runs. Solving this requires either
-a tool like `crane` inside the builder container, or changes to how the lifecycle handles layout
-mode. Only `--buildkit-export-mode=registry` (the default) is supported at this time.
+```bash
+pack build registry.example.com/myapp:latest \
+  --path ./app \
+  --builder jericop/ubuntu-noble-builder:skip-chown-poc \
+  --run-image jericop/ubuntu-noble-run-tiny:skip-chown-poc \
+  --platforms linux/amd64,linux/arm64 \
+  --buildkit \
+  --publish \
+  --trust-builder \
+  --buildkit-builder pack-multiplatform \
+  --build-backend buildkit-llb \
+  --buildkit-export-mode oci-layout
+```
+
+**How it works (two-phase flow):**
+
+1. **Phase 1 — produce OCI layout on disk.** The LLB graph runs the lifecycle with the exporter
+   configured for `-layout -layout-dir /output`, plus `-pull-run-image` (so the analyzer
+   self-populates the run image inside BuildKit) and `-skip-chown` (for the unprivileged BuildKit
+   environment). Each platform's complete OCI image is exported to its own per-arch on-disk
+   content store (`ExporterOCI` with `OutputStore`).
+2. **Phase 2 — import and push natively.** The per-arch layout is imported via
+   `llb.OCILayout(ref, llb.OCIStore("", "applayout"))` (the store attached through
+   `SolveOpt.OCIStores`) and pushed natively via `ExporterImage` with `push=true`, using a
+   shared Docker auth session provider for pack-resolved registry credentials.
+   - **Single-arch:** the image is pushed under the *final* image name — no intermediate tag.
+   - **Multi-arch:** Phase 1 runs per platform, then the per-arch on-disk layouts are assembled
+     into **one** manifest list (via go-containerregistry `remote.WriteIndex`) and pushed
+     atomically — **no intermediate tags** ever land on the registry.
+
+Because the lifecycle's exact layer blobs are re-exported (no re-tarring), the pushed images are
+bit-for-bit what the lifecycle produced: identical diff IDs, `io.buildpacks.lifecycle.metadata`,
+and config. Rebase works identically to registry mode.
+
+**Requirements:** a patched lifecycle that supports **both** `-skip-chown` **and**
+`-pull-run-image` (bundled in `jericop/ubuntu-noble-builder:skip-chown-poc`). The end-to-end
+native push against a real registry is verified by an env-var-gated integration test (see
+[Testing](#testing)); the on-disk correctness of the produced layout is verified by default in
+the unit/on-disk tests.
+
+**Status:** experimental. Use for evaluation, not production. This is the long-term, tag-free
+approach; the Dockerfile MVP with intermediate tags is the interim demonstration.
 
 ## Prerequisites
 
@@ -371,7 +405,7 @@ This forces a completely fresh build with no cached state from any source.
 | `--buildkit-builder` | Name of the buildx builder to use |
 | `--buildkit-cache-from` | External cache source for buildkit |
 | `--buildkit-cache-to` | External cache destination for buildkit |
-| `--buildkit-export-mode` | Export mode: `registry` (default, only supported mode currently) |
+| `--buildkit-export-mode` | Export mode: `registry` (default) or `oci-layout` (LLB backend only, experimental — eliminates intermediate per-arch tags) |
 
 ## Troubleshooting
 
@@ -460,18 +494,125 @@ variants may have different buildpack configurations. Workarounds:
 - The `docker-container` buildx driver cannot access local-only images (`pack.local/...`);
   the Dockerfile references the original remote builder image and injects order/buildpacks separately
 - Cross-platform builds use QEMU emulation which is slower than native compilation
-- The LLB backend requires a lifecycle with `-skip-chown` support for persistent cache mounts
-- The `oci-layout` export mode is not yet functional (lifecycle layout mode needs further work)
-- Intermediate per-arch tags (e.g., `:tag-build-<id>-amd64`) are created during registry mode builds
+- The LLB backend requires a lifecycle with `-skip-chown` support for persistent cache mounts;
+  the `oci-layout` export mode additionally requires `-pull-run-image` (both are bundled in the
+  patched builder image)
+- Intermediate per-arch tags (e.g., `:tag-build-<id>-amd64`) are created in **registry mode**
+  (the default) and by the **Dockerfile MVP backend**, which is by design. The LLB backend's
+  `oci-layout` export mode eliminates these intermediate tags (experimental)
+- The `oci-layout` export mode is implemented only for the LLB backend; the Dockerfile backend
+  does not support it
+
+## Testing
+
+The verification strategy leads with **non-registry (on-disk) testing** and treats registry- and
+daemon-based tests as optional and env-var gated. This works because the LLB `oci-layout` Phase 1
+produces a complete OCI layout on disk with the real image bytes, so parity, structure, and
+rebase-readiness can be checked without pushing anywhere and without the BuildKit
+`docker-container` builder network-isolation problem.
+
+### Tier 1 — unit tests (run by default, no BuildKit, no registry)
+
+These run with a plain `go test ./internal/build/multiplatform/` and cover: LLB graph/args
+(exporter gets `-layout -layout-dir /output -pull-run-image -skip-chown`), store wiring
+(`OCIStores` key matches the `llb.OCIStore` storeID), plan routing (executor skips its own
+assembly when the backend reports native push), export entries, and manifest-list assembly from
+synthetic per-arch OCI layout fixtures (exactly one entry per platform, content-addressed, no tag
+names). The on-disk helpers below also ship with synthetic-fixture unit tests.
+
+### Tier 2 — on-disk OCI layout tests (BuildKit, NO registry) — PRIMARY
+
+These are the primary correctness checks. The on-disk helpers (`oci_layout_inspect.go`,
+`oci_layout_parity.go`, `oci_layout_rebase.go`) read a per-arch layout directly from disk:
+
+- `InspectOCILayout` — layer count/order, per-layer diff IDs, image config (entrypoint, env, user,
+  workdir, ports), the `io.buildpacks.lifecycle.metadata` label, and SBOM presence.
+- `CompareParity` — offline parity between two layouts (recorded lifecycle diff IDs, config RootFS
+  diff IDs, runtime config fields, and all non-lifecycle labels).
+- `CheckRebaseReadiness` — offline rebase-precondition checks (run-image boundary `topLayer` /
+  `reference` present and coherent with the config diff IDs; something preserved above the boundary).
+
+Each helper has synthetic-fixture unit tests that run by default. The *real* Phase 1 build that
+feeds these helpers requires a BuildKit daemon + builder + sample app, so the daemon-driven
+integration tests are gated behind `PACK_TEST_BUILDKIT_ENABLED` and **skipped by default** (Tier 2
+uses BuildKit but no registry, so it deliberately does not reuse the Tier 3 registry env var).
+
+Tier 2 daemon-gated env vars:
+
+| Env var | Purpose |
+|---------|---------|
+| `PACK_TEST_BUILDKIT_ENABLED` | Master gate — when unset the Tier 2 integration tests skip |
+| `PACK_TEST_BUILDER_IMAGE` | Builder image to use (required when enabled) |
+| `PACK_TEST_APP_PATH` | Path to the sample app to build (required when enabled) |
+| `PACK_TEST_BUILDKIT_BUILDER` | buildx builder name (default `pack-multiplatform`) |
+| `PACK_TEST_PLATFORMS` | Platforms to build (default `linux/amd64,linux/arm64`) |
+| `PACK_TEST_PLATFORM_API` | CNB platform API (default `0.12`) |
+
+When enabled these tests drive Phase 1 only (no push, no registry), then verify the on-disk
+layout(s). Enabled-but-missing-prereqs skips with a clear message rather than failing.
+
+### Tier 3 — registry integration test (OPTIONAL, env-var gated, skipped by default)
+
+The stronger end-to-end check: build a multi-arch app with
+`--build-backend=buildkit-llb --buildkit-export-mode=oci-layout --publish` against a real registry
+and assert **no intermediate tags** (only the final manifest-list tag), one manifest-list entry per
+platform, each platform image pulls and is a well-formed launchable CNB image, and registry-vs-on-disk
+parity of the pushed artifacts. Gated behind:
+
+| Env var | Purpose |
+|---------|---------|
+| `PACK_TEST_REGISTRY_ENABLED` | Master gate — when unset the Tier 3 test skips |
+| `PACK_TEST_REGISTRY_REF` | Target image ref to publish/verify (e.g. `ghcr.io/you/app:latest`) |
+
+**Preferred setup:** a real registry the builder can already reach (Docker Hub / GHCR / an ECR
+scratch repo). `docker login` provides the credentials used for push and pull.
+
+**Optional — ephemeral registry on the builder's shared network** (avoids depending on an external
+registry). The `docker-container` builder runs on its own network and cannot reach a host-local
+registry unless the builder was created with a shared network, so create the builder accordingly:
+
+```bash
+docker network create pack-test
+docker run -d --name test-registry --network pack-test -p 5000:5000 registry:2
+docker buildx create --name pack-multiplatform --driver docker-container \
+  --driver-opt network=pack-test --bootstrap
+# reference the registry by container name inside the build:
+#   PACK_TEST_REGISTRY_REF=test-registry:5000/app:latest
+```
+
+Caveat: the builder **must** be created with `--driver-opt network=pack-test` or it cannot reach
+the ephemeral registry. (`FUTURE`: auto-detecting whether the current builder supports local
+network access — to enable this test automatically instead of the env var — is deferred as hard
+to implement reliably.)
+
+> The [RFC](https://github.com/jericop/cnb-rfcs) update is intentionally **deferred** until the
+> feature is confirmed working end-to-end on a real registry (Tier 3). It will document the chosen
+> env-var gating and setup at that point.
 
 ## Future Work
 
-- **LLB Backend Improvements**: Streaming progress display, parallel per-platform solves,
-  better error messages from the buildkit daemon
+- **Ephemeral Registry Export Mode**: Spin up a temporary registry on a shared Docker network
+  with the buildkit builder, push per-arch images there during the build, then assemble the
+  manifest list from the ephemeral registry and push atomically to the final registry. This
+  avoids intermediate tags on the production registry entirely. Requires creating the buildx
+  builder with `--driver-opt network=<shared-network>` so it can reach the ephemeral registry.
+  Downside: requires creating a purpose-built builder (can't reuse an existing one without
+  the correct network). Future enhancement: detect/verify the current builder's network
+  capabilities before deciding whether to use this mode.
 - **Buildah Backend**: Support for `podman`/`buildah` multi-platform builds
 - **Buildpack COPY layers**: For custom `--buildpack` flags, copy buildpack binaries from
   their OCI images via `COPY --from` stages rather than needing an ephemeral builder
-- **OCI Layout Export**: Complete the OCI layout export mode to avoid intermediate registry tags
+- **OCI Layout Export**: Implemented for the LLB backend (experimental) — see
+  [OCI Layout Export Mode](#oci-layout-export-mode-llb-backend--functional-experimental). It uses
+  the lifecycle's `-layout` mode with `-pull-run-image` (which self-populates the run image inside
+  BuildKit, removing the earlier blocker) and `-skip-chown`, then imports the on-disk layout via
+  `llb.OCILayout()` and pushes natively. Remaining nice-to-haves: a shared in-memory content store
+  to avoid the disk-based two-solve, auto-selecting `oci-layout` when
+  the builder supports it, and bringing this mode out of experimental after Tier 3 registry
+  verification lands in CI.
+- **Builder Capability Detection**: Inspect the buildx builder's configuration (network, driver,
+  platform support) before starting a build to provide early feedback and auto-select the best
+  export mode
 
 
 ## POC Repositories

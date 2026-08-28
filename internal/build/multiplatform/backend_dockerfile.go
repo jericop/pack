@@ -40,6 +40,11 @@ func (b *DockerfileBackend) Capabilities() BackendCapabilities {
 		SupportsParallelArch: true, // buildkit handles parallelism internally via single --platform invocation
 		SupportsOCILayout:    true,
 		SupportsSecretMounts: true,
+		// PushesNatively is intentionally false: the Dockerfile MVP does NOT push
+		// the manifest list itself. The lifecycle exporter pushes per-arch images
+		// to intermediate registry tags and the executor assembles the final
+		// manifest list from those tags via `docker buildx imagetools create`.
+		PushesNatively: false,
 	}
 }
 

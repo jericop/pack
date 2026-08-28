@@ -189,6 +189,16 @@ type PlatformBuildResult struct {
 
 	// Platform is the platform this result corresponds to.
 	Platform Platform
+
+	// OCIStoreDir is the on-disk content store directory holding the Phase 1 OCI
+	// layout for this platform (OCI layout mode only). Phase 2 opens/attaches this
+	// store to import the layout via llb.OCILayout (FR-4).
+	OCIStoreDir string
+
+	// OCILayoutDigest is the manifest digest of the Phase 1 OCI layout image
+	// (OCI layout mode only). Phase 2 uses it to build the import reference
+	// "<ref>@<digest>" for llb.OCILayout.
+	OCILayoutDigest string
 }
 
 // BackendCapabilities describes what a build backend supports.
@@ -207,6 +217,16 @@ type BackendCapabilities struct {
 
 	// SupportsSecretMounts indicates the backend can mount secrets into build steps.
 	SupportsSecretMounts bool
+
+	// PushesNatively indicates the backend performs the final registry push /
+	// manifest-list assembly itself, so the executor MUST skip its own
+	// assembly/push. The LLB backend sets this true in OCI layout mode: it
+	// imports each per-arch OCI layout and either pushes it natively via
+	// ExporterImage (single-arch) or assembles + pushes one manifest list from
+	// the per-arch layouts (multi-arch), all with NO intermediate tags (FR-5).
+	// The Dockerfile backend leaves this false — the executor still assembles the
+	// manifest list from per-arch tags via `docker buildx imagetools create`.
+	PushesNatively bool
 }
 
 // BuildBackend is the interface that all multi-platform build backends must implement.
@@ -219,16 +239,6 @@ type BuildBackend interface {
 
 	// Capabilities returns what this backend supports.
 	Capabilities() BackendCapabilities
-}
-
-// ManifestAssembler creates a manifest list (image index) from per-architecture
-// image references and pushes it to a registry. This uses pack's built-in manifest
-// list functionality (imgutil + go-containerregistry) rather than shelling out to
-// external tools like `docker buildx imagetools create`.
-type ManifestAssembler interface {
-	// AssembleAndPushManifest creates a manifest list at manifestListName by fetching
-	// the per-architecture images from the registry and pushing the assembled index.
-	AssembleAndPushManifest(ctx context.Context, manifestListName string, perArchRefs []string) error
 }
 
 // BuildkitOpts holds configuration specific to BuildKit backends.
