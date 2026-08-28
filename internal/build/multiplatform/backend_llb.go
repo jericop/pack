@@ -2,6 +2,8 @@ package multiplatform
 
 import (
 	"context"
+	"encoding/base64"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -15,8 +17,10 @@ import (
 	"github.com/moby/buildkit/client"
 	_ "github.com/moby/buildkit/client/connhelper/dockercontainer" // register docker-container:// scheme
 	"github.com/moby/buildkit/client/llb"
+	"github.com/moby/buildkit/exporter/containerimage/exptypes"
 	"github.com/moby/buildkit/session"
 	"github.com/moby/buildkit/session/auth/authprovider"
+	"github.com/opencontainers/go-digest"
 	ocispecs "github.com/opencontainers/image-spec/specs-go/v1"
 	"github.com/tonistiigi/fsutil"
 
@@ -320,7 +324,7 @@ func (b *LLBBackend) solvePlatform(ctx context.Context, bkClient *client.Client,
 	}
 
 	// Solve
-	_, err = bkClient.Solve(ctx, def, solveOpt, ch)
+	solveResp, err := bkClient.Solve(ctx, def, solveOpt, ch)
 	if err != nil {
 		return PlatformBuildResult{}, fmt.Errorf("solving LLB for %s: %w", platform.String(), err)
 	}
@@ -333,6 +337,17 @@ func (b *LLBBackend) solvePlatform(ctx context.Context, bkClient *client.Client,
 		// Expose the on-disk store dir so Phase 2 / on-disk inspection can locate it.
 		result.ImageRef = phase1StoreDir
 		result.OCIStoreDir = phase1StoreDir
+
+		// With tar=false the OCI exporter copies the image blobs into the content
+		// store (blobs/sha256/...) but does NOT write the OCI layout marker files
+		// (index.json / oci-layout) — those are only produced by the tar path. Our
+		// Phase 2 import and on-disk inspection both read the dir as a standard OCI
+		// layout (via go-containerregistry layout.FromPath), so synthesize the
+		// index.json + oci-layout marker from the manifest descriptor the solve
+		// returned. This turns the content store dir into a valid OCI layout.
+		if err := writeOCILayoutIndexFromSolve(phase1StoreDir, solveResp); err != nil {
+			return PlatformBuildResult{}, fmt.Errorf("writing OCI layout index for %s: %w", platform.String(), err)
+		}
 
 		// Phase 2 attaches this content.Store via SolveOpt.OCIStores. We reuse the
 		// Phase 1 store handle when we still hold it (avoids re-opening the
@@ -581,6 +596,83 @@ func openPhase1Store(storeDir string) (content.Store, error) {
 		return nil, fmt.Errorf("opening content store at %s: %w", storeDir, err)
 	}
 	return store, nil
+}
+
+// writeOCILayoutIndexFromSolve turns a content-store directory into a valid OCI
+// image layout by writing the two marker files the tar exporter would have
+// written but the store (tar=false) path does not: the "oci-layout" version
+// marker and an "index.json" referencing the image manifest.
+//
+// With tar=false BuildKit's OCI exporter copies the image blobs into the content
+// store (blobs/sha256/...) and returns the top-level manifest descriptor in the
+// solve response (exptypes.ExporterImageDescriptorKey, base64-encoded JSON; or
+// ExporterImageDigestKey as a fallback). We decode that descriptor and write it
+// as the sole entry of index.json, so the directory reads as a standard OCI
+// layout for both Phase 2's llb.OCILayout import and the on-disk inspection.
+func writeOCILayoutIndexFromSolve(storeDir string, resp *client.SolveResponse) error {
+	if resp == nil {
+		return fmt.Errorf("nil solve response")
+	}
+
+	desc, err := descriptorFromSolveResponse(resp)
+	if err != nil {
+		return err
+	}
+
+	index := ocispecs.Index{
+		MediaType: ocispecs.MediaTypeImageIndex,
+		Manifests: []ocispecs.Descriptor{desc},
+	}
+	index.SchemaVersion = 2
+
+	indexJSON, err := json.Marshal(index)
+	if err != nil {
+		return fmt.Errorf("marshaling index.json: %w", err)
+	}
+	if err := os.WriteFile(filepath.Join(storeDir, "index.json"), indexJSON, 0644); err != nil {
+		return fmt.Errorf("writing index.json to %s: %w", storeDir, err)
+	}
+
+	// The "oci-layout" marker file declares the layout version (imageLayoutVersion).
+	layoutMarker, err := json.Marshal(ocispecs.ImageLayout{Version: ocispecs.ImageLayoutVersion})
+	if err != nil {
+		return fmt.Errorf("marshaling oci-layout marker: %w", err)
+	}
+	if err := os.WriteFile(filepath.Join(storeDir, "oci-layout"), layoutMarker, 0644); err != nil {
+		return fmt.Errorf("writing oci-layout marker to %s: %w", storeDir, err)
+	}
+	return nil
+}
+
+// descriptorFromSolveResponse extracts the top-level image manifest descriptor
+// from a solve response. It prefers the full base64-encoded descriptor
+// (ExporterImageDescriptorKey); if absent it falls back to reconstructing a
+// minimal descriptor from the digest (ExporterImageDigestKey) with the OCI
+// manifest media type.
+func descriptorFromSolveResponse(resp *client.SolveResponse) (ocispecs.Descriptor, error) {
+	if resp.ExporterResponse != nil {
+		if encoded, ok := resp.ExporterResponse[exptypes.ExporterImageDescriptorKey]; ok && encoded != "" {
+			raw, err := base64.StdEncoding.DecodeString(encoded)
+			if err != nil {
+				return ocispecs.Descriptor{}, fmt.Errorf("decoding image descriptor: %w", err)
+			}
+			var desc ocispecs.Descriptor
+			if err := json.Unmarshal(raw, &desc); err != nil {
+				return ocispecs.Descriptor{}, fmt.Errorf("unmarshaling image descriptor: %w", err)
+			}
+			if desc.Digest != "" {
+				return desc, nil
+			}
+		}
+		if dgst, ok := resp.ExporterResponse[exptypes.ExporterImageDigestKey]; ok && dgst != "" {
+			return ocispecs.Descriptor{
+				MediaType: ocispecs.MediaTypeImageManifest,
+				Digest:    digest.Digest(dgst),
+			}, nil
+		}
+	}
+	return ocispecs.Descriptor{}, fmt.Errorf("solve response has no image descriptor (%s) or digest (%s)",
+		exptypes.ExporterImageDescriptorKey, exptypes.ExporterImageDigestKey)
 }
 
 // readPhase1LayoutDigest reads the manifest digest of the single image in the
