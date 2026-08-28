@@ -3,8 +3,21 @@
 # A slim, Linux-only alternative to the upstream `build.yml` for cutting
 # experimental fork releases without spending macOS/Windows runner minutes.
 # It runs unit tests on Linux, builds the linux/amd64 + linux/arm64 pack
-# binaries, and creates a DRAFT GitHub Release in this repo. Publishing that
-# draft triggers `delivery-docker.yml` (which pushes to docker.io/${DOCKERHUB_ORG}/pack).
+# binaries, and creates a DRAFT GitHub Release (marked prerelease) in this repo
+# with the .tgz artifacts attached.
+#
+# The GitHub release and the Docker image are published in two separate MANUAL
+# steps (see .kiro/steering/fork-release-process.md):
+#   1. Publish the draft release in the GitHub UI (makes the release + artifacts
+#      public). Because the draft is a prerelease, publishing does NOT emit the
+#      `released` event, so it does not auto-trigger delivery-docker.yml.
+#   2. Run `delivery-docker.yml` manually (workflow_dispatch, tag_name=v<version>)
+#      to build + push the multi-arch image to docker.io/${DOCKERHUB_ORG}/pack.
+#
+# The unit job runs `make unit` (go test ./...). The BuildKit/registry
+# integration tests (oci_layout_*_integration_test.go) are gated behind
+# PACK_TEST_BUILDKIT_ENABLED / PACK_TEST_REGISTRY_ENABLED, which are NOT set
+# here, so they SKIP — no custom buildkit builder or local registry is used.
 #
 # Triggered by pushing a branch named `release/<version>` (the version is
 # derived from the branch name, matching upstream's convention) or manually via
