@@ -2,8 +2,6 @@ package multiplatform
 
 import (
 	"context"
-	"encoding/base64"
-	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -11,16 +9,15 @@ import (
 
 	"golang.org/x/sync/errgroup"
 
+	"github.com/buildpacks/imgutil/layout"
 	"github.com/containerd/containerd/v2/core/content"
 	contentlocal "github.com/containerd/containerd/v2/plugins/content/local"
 	"github.com/docker/cli/cli/config"
 	"github.com/moby/buildkit/client"
 	_ "github.com/moby/buildkit/client/connhelper/dockercontainer" // register docker-container:// scheme
 	"github.com/moby/buildkit/client/llb"
-	"github.com/moby/buildkit/exporter/containerimage/exptypes"
 	"github.com/moby/buildkit/session"
 	"github.com/moby/buildkit/session/auth/authprovider"
-	"github.com/opencontainers/go-digest"
 	ocispecs "github.com/opencontainers/image-spec/specs-go/v1"
 	"github.com/tonistiigi/fsutil"
 
@@ -304,27 +301,25 @@ func (b *LLBBackend) solvePlatform(ctx context.Context, bkClient *client.Client,
 	// returned so Phase 2 (a separate task) can attach it via SolveOpt.OCIStores
 	// and re-export the image via ExporterImage. Registry mode (the default) adds
 	// no Exports here and keeps its existing push-during-exporter behavior.
-	var phase1Store content.Store
 	var phase1StoreDir string
 	if opts.ExportMode == ExportOCILayout {
 		phase1StoreDir = perArchStoreDir(opts, platform)
 		if err := os.MkdirAll(phase1StoreDir, 0755); err != nil {
-			return PlatformBuildResult{}, fmt.Errorf("creating per-arch content store dir %s: %w", phase1StoreDir, err)
+			return PlatformBuildResult{}, fmt.Errorf("creating per-arch layout dir %s: %w", phase1StoreDir, err)
 		}
-		// Use an explicit OutputStore (rather than OutputDir) so we hold the
-		// content.Store handle for Phase 2's SolveOpt.OCIStores without re-opening
-		// the directory. BuildKit would otherwise construct this same store from
-		// OutputDir internally (see buildkit client/solve.go).
-		phase1Store, err = contentlocal.NewStore(phase1StoreDir)
-		if err != nil {
-			return PlatformBuildResult{}, fmt.Errorf("creating content store at %s: %w", phase1StoreDir, err)
-		}
-		b.logger.Debugf("Phase 1: exporting OCI layout for %s to content store %s", platform.String(), phase1StoreDir)
-		solveOpt.Exports = phase1ExportEntry(phase1Store, perArchTag)
+		// Export the isolated CNB OCI layout (buildLLBState rooted scratch at the
+		// nested /output/<ref-path> layout) to the host as a FILESYSTEM via
+		// ExporterLocal → OutputDir. The exported files ARE the OCI layout
+		// (index.json, oci-layout, blobs/), so no index synthesis is needed and
+		// the layout carries the real config labels + all layers. ExporterLocal
+		// uses filesync's dir target (registered by the client for OutputDir), so
+		// there is no "FileSend/diffcopy not supported" issue.
+		b.logger.Debugf("Phase 1: exporting CNB OCI layout for %s to %s", platform.String(), phase1StoreDir)
+		solveOpt.Exports = phase1ExportEntry(phase1StoreDir)
 	}
 
 	// Solve
-	solveResp, err := bkClient.Solve(ctx, def, solveOpt, ch)
+	_, err = bkClient.Solve(ctx, def, solveOpt, ch)
 	if err != nil {
 		return PlatformBuildResult{}, fmt.Errorf("solving LLB for %s: %w", platform.String(), err)
 	}
@@ -334,30 +329,15 @@ func (b *LLBBackend) solvePlatform(ctx context.Context, bkClient *client.Client,
 		ImageRef: perArchTag,
 	}
 	if opts.ExportMode == ExportOCILayout {
-		// Expose the on-disk store dir so Phase 2 / on-disk inspection can locate it.
+		// The exported dir is a complete OCI layout on the host.
 		result.ImageRef = phase1StoreDir
 		result.OCIStoreDir = phase1StoreDir
 
-		// With tar=false the OCI exporter copies the image blobs into the content
-		// store (blobs/sha256/...) but does NOT write the OCI layout marker files
-		// (index.json / oci-layout) — those are only produced by the tar path. Our
-		// Phase 2 import and on-disk inspection both read the dir as a standard OCI
-		// layout (via go-containerregistry layout.FromPath), so synthesize the
-		// index.json + oci-layout marker from the manifest descriptor the solve
-		// returned. This turns the content store dir into a valid OCI layout.
-		if err := writeOCILayoutIndexFromSolve(phase1StoreDir, solveResp); err != nil {
-			return PlatformBuildResult{}, fmt.Errorf("writing OCI layout index for %s: %w", platform.String(), err)
-		}
-
-		// Phase 2 attaches this content.Store via SolveOpt.OCIStores. We reuse the
-		// Phase 1 store handle when we still hold it (avoids re-opening the
-		// directory); openPhase1Store exists for callers that only know the dir.
-		phase2Store := phase1Store
-		if phase2Store == nil {
-			phase2Store, err = openPhase1Store(phase1StoreDir)
-			if err != nil {
-				return PlatformBuildResult{}, fmt.Errorf("opening phase 1 store for %s: %w", platform.String(), err)
-			}
+		// Phase 2 attaches the on-disk layout as a content.Store via
+		// SolveOpt.OCIStores. Open it from the exported dir (a valid OCI layout).
+		phase2Store, err := openPhase1Store(phase1StoreDir)
+		if err != nil {
+			return PlatformBuildResult{}, fmt.Errorf("opening phase 1 store for %s: %w", platform.String(), err)
 		}
 
 		layoutDigest, err := readPhase1LayoutDigest(phase1StoreDir)
@@ -464,17 +444,15 @@ func (b *LLBBackend) solvePhase2Push(
 // to a registry — the sole registry write in OCI layout mode happens later
 // (single-arch: phase2ExportEntry; multi-arch: the manifest-list assembly).
 // Extracted so the export shape is unit-testable without a live BuildKit daemon.
-func phase1ExportEntry(store content.Store, perArchTag string) []client.ExportEntry {
+func phase1ExportEntry(outputDir string) []client.ExportEntry {
 	return []client.ExportEntry{{
-		Type:        client.ExporterOCI,
-		OutputStore: store,
-		// tar=false makes the daemon's OCI exporter write the layout to the
-		// attached content store (OutputStore) instead of streaming a tarball to
-		// the client over filesync. Without it the exporter defaults to tar=true
-		// and fails with "method /moby.filesync.v1.FileSend/diffcopy not supported
-		// by the client" because we register a content-store session, not a
-		// filesync target.
-		Attrs: map[string]string{"name": perArchTag, "tar": "false"},
+		// ExporterLocal writes the solved scratch filesystem (which buildLLBState
+		// rooted at the nested CNB OCI layout) to outputDir on the host via
+		// filesync's dir target. The exported files ARE the OCI layout
+		// (index.json, oci-layout, blobs/), so the dir is directly usable as the
+		// Phase 1 layout — no ExporterOCI wrapping and no index synthesis.
+		Type:      client.ExporterLocal,
+		OutputDir: outputDir,
 	}}
 }
 
@@ -596,83 +574,6 @@ func openPhase1Store(storeDir string) (content.Store, error) {
 		return nil, fmt.Errorf("opening content store at %s: %w", storeDir, err)
 	}
 	return store, nil
-}
-
-// writeOCILayoutIndexFromSolve turns a content-store directory into a valid OCI
-// image layout by writing the two marker files the tar exporter would have
-// written but the store (tar=false) path does not: the "oci-layout" version
-// marker and an "index.json" referencing the image manifest.
-//
-// With tar=false BuildKit's OCI exporter copies the image blobs into the content
-// store (blobs/sha256/...) and returns the top-level manifest descriptor in the
-// solve response (exptypes.ExporterImageDescriptorKey, base64-encoded JSON; or
-// ExporterImageDigestKey as a fallback). We decode that descriptor and write it
-// as the sole entry of index.json, so the directory reads as a standard OCI
-// layout for both Phase 2's llb.OCILayout import and the on-disk inspection.
-func writeOCILayoutIndexFromSolve(storeDir string, resp *client.SolveResponse) error {
-	if resp == nil {
-		return fmt.Errorf("nil solve response")
-	}
-
-	desc, err := descriptorFromSolveResponse(resp)
-	if err != nil {
-		return err
-	}
-
-	index := ocispecs.Index{
-		MediaType: ocispecs.MediaTypeImageIndex,
-		Manifests: []ocispecs.Descriptor{desc},
-	}
-	index.SchemaVersion = 2
-
-	indexJSON, err := json.Marshal(index)
-	if err != nil {
-		return fmt.Errorf("marshaling index.json: %w", err)
-	}
-	if err := os.WriteFile(filepath.Join(storeDir, "index.json"), indexJSON, 0644); err != nil {
-		return fmt.Errorf("writing index.json to %s: %w", storeDir, err)
-	}
-
-	// The "oci-layout" marker file declares the layout version (imageLayoutVersion).
-	layoutMarker, err := json.Marshal(ocispecs.ImageLayout{Version: ocispecs.ImageLayoutVersion})
-	if err != nil {
-		return fmt.Errorf("marshaling oci-layout marker: %w", err)
-	}
-	if err := os.WriteFile(filepath.Join(storeDir, "oci-layout"), layoutMarker, 0644); err != nil {
-		return fmt.Errorf("writing oci-layout marker to %s: %w", storeDir, err)
-	}
-	return nil
-}
-
-// descriptorFromSolveResponse extracts the top-level image manifest descriptor
-// from a solve response. It prefers the full base64-encoded descriptor
-// (ExporterImageDescriptorKey); if absent it falls back to reconstructing a
-// minimal descriptor from the digest (ExporterImageDigestKey) with the OCI
-// manifest media type.
-func descriptorFromSolveResponse(resp *client.SolveResponse) (ocispecs.Descriptor, error) {
-	if resp.ExporterResponse != nil {
-		if encoded, ok := resp.ExporterResponse[exptypes.ExporterImageDescriptorKey]; ok && encoded != "" {
-			raw, err := base64.StdEncoding.DecodeString(encoded)
-			if err != nil {
-				return ocispecs.Descriptor{}, fmt.Errorf("decoding image descriptor: %w", err)
-			}
-			var desc ocispecs.Descriptor
-			if err := json.Unmarshal(raw, &desc); err != nil {
-				return ocispecs.Descriptor{}, fmt.Errorf("unmarshaling image descriptor: %w", err)
-			}
-			if desc.Digest != "" {
-				return desc, nil
-			}
-		}
-		if dgst, ok := resp.ExporterResponse[exptypes.ExporterImageDigestKey]; ok && dgst != "" {
-			return ocispecs.Descriptor{
-				MediaType: ocispecs.MediaTypeImageManifest,
-				Digest:    digest.Digest(dgst),
-			}, nil
-		}
-	}
-	return ocispecs.Descriptor{}, fmt.Errorf("solve response has no image descriptor (%s) or digest (%s)",
-		exptypes.ExporterImageDescriptorKey, exptypes.ExporterImageDigestKey)
 }
 
 // readPhase1LayoutDigest reads the manifest digest of the single image in the
@@ -857,41 +758,64 @@ func (b *LLBBackend) buildLLBState(opts PlatformBuildOpts, platform Platform, pe
 		}, envOpts...)...,
 	).Root()
 
-	// In OCI layout mode, the exporter wrote a complete OCI image to /output.
-	// Phase 1's export subject must be that layout, not the whole container root.
-	// Isolate it by copying /output into a fresh scratch state so the marshaled
-	// definition roots the OCI layout at "/" of the exported filesystem.
+	// In OCI layout mode, the exporter wrote a complete OCI image to
+	// /output/<ParseRefToPath(perArchTag)>/ (a nested OCI layout with its own
+	// index.json, oci-layout marker, and blobs/). Phase 1's export subject must be
+	// THAT nested layout — not /output itself (which also contains the pulled run
+	// image) and not the whole container root. Copy the nested layout to a fresh
+	// scratch state so "/" of the exported filesystem IS the CNB OCI layout.
 	if opts.ExportMode == ExportOCILayout {
-		return isolateOutputLayout(base)
+		return isolateOutputLayout(base, perArchLayoutSubpath(perArchTag))
 	}
 
 	return base
 }
 
-// isolateOutputLayout returns a scratch-rooted state containing only the OCI
-// layout the lifecycle exporter wrote to /output.
+// perArchLayoutSubpath returns the path under /output where the lifecycle wrote
+// the per-arch CNB image in -layout mode, e.g.
+// "/output/localhost:5050/no-imports/multiarch-build-<id>-<arch>". It mirrors
+// imgutil/layout.ParseRefToPath, which the lifecycle uses to place the image.
+func perArchLayoutSubpath(perArchTag string) string {
+	refPath, err := layout.ParseRefToPath(perArchTag)
+	if err != nil {
+		// Fall back to /output root; the export will then include the run image
+		// too, but this only happens for an unparseable ref (which would have
+		// failed earlier in the lifecycle).
+		return "/output"
+	}
+	return filepath.Join("/output", refPath)
+}
+
+// isolateOutputLayout returns a scratch-rooted state whose root ("/") IS the
+// per-arch CNB OCI layout the lifecycle exporter wrote to
+// layoutSubpath (= /output/<ParseRefToPath(perArchTag)>).
 //
-// Design decision (design.md "Risk: Isolating /output for the OCI export",
-// open item 5): the two candidate approaches were (a) exporting an
-// ExporterOCI of the /output subtree, or (b) copying /output into llb.Scratch()
-// before export. We use (b): copy /output into llb.Scratch(). This is the
-// cleaner, more portable choice because:
-//   - ExporterOCI exports the root ("/") of whatever state it is given; there is
-//     no per-export "subpath" knob to point it at /output. So making /output the
-//     export root still requires producing a state whose root IS /output.
-//   - Copying /output into llb.Scratch() yields exactly that: a state whose "/"
-//     is the OCI layout (index.json, oci-layout, blobs/). The subsequent
-//     ExporterOCI then writes a clean layout with no container-root noise.
-//   - It keeps the Phase 1 store minimal (only the layout bytes), which makes the
-//     on-disk inspection (Task 7) and Phase 2 import (llb.OCILayout) straightforward.
-func isolateOutputLayout(exported llb.State) llb.State {
+// CRITICAL (why we copy the NESTED subpath, not /output): the lifecycle writes
+// the built image as a nested OCI layout at /output/<ref-path>/ (its own
+// index.json + oci-layout + blobs/), and /output ALSO contains the pulled run
+// image at /output/<run-image-path>/. Copying all of /output and exporting it
+// produced a WRONG artifact: a wrapper image whose single layer was a tarball of
+// the /output tree (no CNB metadata, not runnable). Copying only the nested
+// layout subtree to scratch root yields a state whose "/" is exactly the CNB OCI
+// layout, so a filesystem (ExporterLocal) export lands a real, complete OCI
+// layout on the host — correct diff IDs, config labels
+// (io.buildpacks.lifecycle.metadata), and all layers.
+//
+// We copy the CONTENTS of layoutSubpath (trailing "/.") into scratch "/" so the
+// index.json/oci-layout/blobs sit at the layout root, not one level down.
+func isolateOutputLayout(exported llb.State, layoutSubpath string) llb.State {
+	src := layoutSubpath
+	if !strings.HasSuffix(src, "/.") {
+		src = strings.TrimSuffix(src, "/") + "/."
+	}
 	return llb.Scratch().File(
-		llb.Copy(exported, "/output", "/", &llb.CopyInfo{
+		llb.Copy(exported, src, "/", &llb.CopyInfo{
 			CreateDestPath:     true,
+			CopyDirContentsOnly: true,
 			AllowWildcard:      true,
 			AllowEmptyWildcard: true,
 		}),
-		llb.WithCustomName("isolate /output OCI layout"),
+		llb.WithCustomName("isolate CNB OCI layout ("+layoutSubpath+")"),
 	)
 }
 

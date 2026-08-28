@@ -364,37 +364,24 @@ func testLLBBackendInternal(t *testing.T, when spec.G, it spec.S) {
 	})
 
 	when("#phase1ExportEntry", func() {
-		it("produces exactly one ExporterOCI entry to the content store", func() {
+		it("produces exactly one ExporterLocal entry to the given output dir", func() {
 			dir, _ := writeSyntheticStore(t, 1)
-			store, err := openPhase1Store(dir)
-			h.AssertNil(t, err)
 
-			entries := phase1ExportEntry(store, perArchTag)
+			entries := phase1ExportEntry(dir)
 			h.AssertEq(t, len(entries), 1)
-			h.AssertEq(t, entries[0].Type, client.ExporterOCI)
-			h.AssertNotNil(t, entries[0].OutputStore)
-			// tar=false routes the export to the content store instead of a
-			// filesync tar stream (avoids "FileSend/diffcopy not supported").
-			h.AssertEq(t, entries[0].Attrs["tar"], "false")
+			// ExporterLocal writes the isolated CNB OCI layout (scratch rooted at
+			// the nested /output/<ref-path>) to the host dir via filesync's dir
+			// target — a real OCI layout on disk, no OCI-image wrapping.
+			h.AssertEq(t, entries[0].Type, client.ExporterLocal)
+			h.AssertEq(t, entries[0].OutputDir, dir)
 		})
 
 		it("does not set push=true (Phase 1 writes locally, never to a registry)", func() {
 			dir, _ := writeSyntheticStore(t, 1)
-			store, err := openPhase1Store(dir)
-			h.AssertNil(t, err)
 
-			entries := phase1ExportEntry(store, perArchTag)
+			entries := phase1ExportEntry(dir)
 			_, hasPush := entries[0].Attrs["push"]
 			h.AssertEq(t, hasPush, false)
-		})
-
-		it("names the export after the per-arch tag (the on-disk layout subject)", func() {
-			dir, _ := writeSyntheticStore(t, 1)
-			store, err := openPhase1Store(dir)
-			h.AssertNil(t, err)
-
-			entries := phase1ExportEntry(store, perArchTag)
-			h.AssertEq(t, entries[0].Attrs["name"], perArchTag)
 		})
 	})
 
@@ -459,14 +446,18 @@ func testLLBBackendInternal(t *testing.T, when spec.G, it spec.S) {
 	})
 
 	when("#isolateOutputLayout", func() {
-		it("copies /output to the root of a scratch state", func() {
-			isolated := isolateOutputLayout(llb.Image("base:latest"))
+		it("copies the nested CNB layout subpath contents to the root of a scratch state", func() {
+			// The lifecycle writes the CNB image to /output/<ref-path>/; we must
+			// root scratch at THAT nested layout (not /output, which also holds the
+			// run image). Copy uses the "/." contents form so the layout's
+			// index.json/oci-layout/blobs land at scratch root.
+			subpath := "/output/localhost:5050/no-imports/multiarch-build-abc-amd64"
+			isolated := isolateOutputLayout(llb.Image("base:latest"), subpath)
 			copies := copyActions(t, isolated)
 
-			// Exactly one copy: /output -> /
 			var found bool
 			for _, c := range copies {
-				if c.Src == "/output" && c.Dest == "/" {
+				if strings.HasPrefix(c.Src, subpath) && c.Dest == "/" {
 					found = true
 				}
 			}
@@ -492,13 +483,16 @@ func testLLBBackendInternal(t *testing.T, when spec.G, it spec.S) {
 				baseOpts.ExportMode = ExportOCILayout
 			})
 
-			it("returns a state that isolates /output to the root", func() {
+			it("returns a state that isolates the nested CNB layout under /output to the root", func() {
 				state := b.buildLLBState(baseOpts, platform, perArchTag)
 				copies := copyActions(t, state)
 
+				// The isolate step copies the nested layout at
+				// /output/<ParseRefToPath(perArchTag)>/. to scratch "/", not
+				// /output itself.
 				var found bool
 				for _, c := range copies {
-					if c.Src == "/output" && c.Dest == "/" {
+					if strings.HasPrefix(c.Src, "/output/") && c.Dest == "/" {
 						found = true
 					}
 				}
