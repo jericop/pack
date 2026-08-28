@@ -45,6 +45,11 @@ jobs:
   release:
     needs: unit
     runs-on: ubuntu-latest
+    # The default GITHUB_TOKEN needs explicit write access to create the release.
+    # Its default scopes are often read-only (esp. on forks), which causes
+    # "403 Resource not accessible by integration". contents: write is enough.
+    permissions:
+      contents: write
     steps:
       - uses: actions/checkout@v4
       - name: Set up go
