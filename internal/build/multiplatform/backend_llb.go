@@ -691,6 +691,13 @@ func (b *LLBBackend) buildLLBState(opts PlatformBuildOpts, platform Platform, pe
 	if opts.RegistryAuth != "" {
 		envOpts = append(envOpts, llb.AddEnv("CNB_REGISTRY_AUTH", opts.RegistryAuth))
 	}
+	// OCI layout export (-layout) is a lifecycle EXPERIMENTAL feature; without
+	// this it aborts with "experimental features are disabled by
+	// CNB_EXPERIMENTAL_MODE=error". The Dockerfile backend sets the same env
+	// (see generateLifecycleRunMultiPlatform / dockerfile_generator.go).
+	if opts.ExportMode == ExportOCILayout {
+		envOpts = append(envOpts, llb.AddEnv("CNB_EXPERIMENTAL_MODE", "warn"))
+	}
 
 	// --- Lifecycle phases ---
 	// All analyzer/restorer/exporter args include -skip-chown -uid -gid
