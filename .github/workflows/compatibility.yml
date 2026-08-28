@@ -5,7 +5,6 @@ name: compatibility
 # manual-only (workflow_dispatch).
 on:
   workflow_dispatch: {}
-      - 'release/**'
 
 jobs:
   acceptance-combo:
