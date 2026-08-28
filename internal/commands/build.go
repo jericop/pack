@@ -26,51 +26,53 @@ import (
 )
 
 type BuildFlags struct {
-	Publish                bool
-	ClearCache             bool
-	DisableSystemBuilpacks bool
-	TrustBuilder           bool
-	TrustExtraBuildpacks   bool
-	Interactive            bool
-	Sparse                 bool
-	EnableUsernsHost       bool
-	Buildkit               bool
-	DockerHost             string
-	CacheImage             string
-	Cache                  cache.CacheOpts
-	AppPath                string
-	Builder                string
-	ExecutionEnv           string
-	Registry               string
-	RunImage               string
-	Platform               string
-	Platforms              string
-	BuildBackend           string
-	BuildkitBuilder        string
-	BuildkitCacheFrom      []string
-	BuildkitCacheTo        []string
-	BuildkitExportMode     string
-	Policy                 string
-	Network                string
-	DescriptorPath         string
-	DefaultProcessType     string
-	LifecycleImage         string
-	Env                    []string
-	EnvFiles               []string
-	Buildpacks             []string
-	Extensions             []string
-	Volumes                []string
-	AdditionalTags         []string
-	Workspace              string
-	GID                    int
-	UID                    int
-	PreviousImage          string
-	SBOMDestinationDir     string
-	ReportDestinationDir   string
-	DateTime               string
-	PreBuildpacks          []string
-	PostBuildpacks         []string
-	InsecureRegistries     []string
+	Publish                   bool
+	ClearCache                bool
+	DisableSystemBuilpacks    bool
+	TrustBuilder              bool
+	TrustExtraBuildpacks      bool
+	Interactive               bool
+	Sparse                    bool
+	EnableUsernsHost          bool
+	Buildkit                  bool
+	DockerHost                string
+	CacheImage                string
+	Cache                     cache.CacheOpts
+	AppPath                   string
+	Builder                   string
+	ExecutionEnv              string
+	Registry                  string
+	RunImage                  string
+	Platform                  string
+	Platforms                 string
+	BuildBackend              string
+	BuildkitBuilder           string
+	BuildkitCacheFrom         []string
+	BuildkitCacheTo           []string
+	BuildkitExportMode        string
+	BuildkitOCILayoutDir      string
+	BuildkitOCILayoutDirClear bool
+	Policy                    string
+	Network                   string
+	DescriptorPath            string
+	DefaultProcessType        string
+	LifecycleImage            string
+	Env                       []string
+	EnvFiles                  []string
+	Buildpacks                []string
+	Extensions                []string
+	Volumes                   []string
+	AdditionalTags            []string
+	Workspace                 string
+	GID                       int
+	UID                       int
+	PreviousImage             string
+	SBOMDestinationDir        string
+	ReportDestinationDir      string
+	DateTime                  string
+	PreBuildpacks             []string
+	PostBuildpacks            []string
+	InsecureRegistries        []string
 }
 
 // Build an image from source code
@@ -182,26 +184,28 @@ func Build(logger logging.Logger, cfg config.Config, packClient PackClient) *cob
 				return errors.Wrapf(err, "parsing creation time %s", flags.DateTime)
 			}
 			if err := packClient.Build(cmd.Context(), client.BuildOptions{
-				AppPath:           flags.AppPath,
-				Builder:           builder,
-				Registry:          flags.Registry,
-				AdditionalMirrors: getMirrors(cfg),
-				AdditionalTags:    flags.AdditionalTags,
-				RunImage:          flags.RunImage,
-				Env:               env,
-				Image:             inputImageName.Name(),
-				Publish:           flags.Publish,
-				DockerHost:        flags.DockerHost,
-				Platform:          flags.Platform,
-				Platforms:         flags.Platforms,
-				Buildkit:          flags.Buildkit,
-				BuildBackend:      flags.BuildBackend,
-				BuildkitBuilder:   flags.BuildkitBuilder,
-				BuildkitCacheFrom: flags.BuildkitCacheFrom,
-				BuildkitCacheTo:   flags.BuildkitCacheTo,
-				BuildkitExportMode: flags.BuildkitExportMode,
-				PullPolicy:        pullPolicy,
-				ClearCache:        flags.ClearCache,
+				AppPath:                   flags.AppPath,
+				Builder:                   builder,
+				Registry:                  flags.Registry,
+				AdditionalMirrors:         getMirrors(cfg),
+				AdditionalTags:            flags.AdditionalTags,
+				RunImage:                  flags.RunImage,
+				Env:                       env,
+				Image:                     inputImageName.Name(),
+				Publish:                   flags.Publish,
+				DockerHost:                flags.DockerHost,
+				Platform:                  flags.Platform,
+				Platforms:                 flags.Platforms,
+				Buildkit:                  flags.Buildkit,
+				BuildBackend:              flags.BuildBackend,
+				BuildkitBuilder:           flags.BuildkitBuilder,
+				BuildkitCacheFrom:         flags.BuildkitCacheFrom,
+				BuildkitCacheTo:           flags.BuildkitCacheTo,
+				BuildkitExportMode:        flags.BuildkitExportMode,
+				BuildkitOCILayoutDir:      flags.BuildkitOCILayoutDir,
+				BuildkitOCILayoutDirClear: flags.BuildkitOCILayoutDirClear,
+				PullPolicy:                pullPolicy,
+				ClearCache:                flags.ClearCache,
 				TrustBuilder: func(string) bool {
 					return trustBuilder
 				},
@@ -307,6 +311,8 @@ This option may set DOCKER_HOST environment variable for the build container if 
 	cmd.Flags().StringArrayVar(&buildFlags.BuildkitCacheFrom, "buildkit-cache-from", nil, `External cache source for buildkit (e.g., "type=registry,ref=myapp-cache:latest").`)
 	cmd.Flags().StringArrayVar(&buildFlags.BuildkitCacheTo, "buildkit-cache-to", nil, `External cache destination for buildkit (e.g., "type=registry,ref=myapp-cache:latest,mode=max").`)
 	cmd.Flags().StringVar(&buildFlags.BuildkitExportMode, "buildkit-export-mode", "registry", `How per-arch images are exported. "registry" (default): lifecycle pushes per-arch tags; "oci-layout": export to disk and push atomically (no temp tags).`)
+	cmd.Flags().StringVar(&buildFlags.BuildkitOCILayoutDir, "buildkit-oci-layout-dir", "", `[oci-layout mode] Directory to write per-arch OCI layout artifacts to (a unique per-build subdirectory is created under it). When set, artifacts are kept for debugging and you are responsible for cleanup. When empty (default), a temp directory is used and removed after the build.`)
+	cmd.Flags().BoolVar(&buildFlags.BuildkitOCILayoutDirClear, "buildkit-oci-layout-dir-clear", false, `[oci-layout mode] Clear the --buildkit-oci-layout-dir directory before the build starts. Requires --buildkit-oci-layout-dir.`)
 	cmd.Flags().StringVar(&buildFlags.Policy, "pull-policy", "", `Pull policy to use. Accepted values are always, never, and if-not-present. (default "always")`)
 	cmd.Flags().StringVar(&buildFlags.ExecutionEnv, "exec-env", "production", `Execution environment to use. (default "production"`)
 	cmd.Flags().StringVarP(&buildFlags.Registry, "buildpack-registry", "r", cfg.DefaultRegistryName, "Buildpack Registry by name")
@@ -334,6 +340,8 @@ This option may set DOCKER_HOST environment variable for the build container if 
 		cmd.Flags().MarkHidden("buildkit-cache-from")
 		cmd.Flags().MarkHidden("buildkit-cache-to")
 		cmd.Flags().MarkHidden("buildkit-export-mode")
+		cmd.Flags().MarkHidden("buildkit-oci-layout-dir")
+		cmd.Flags().MarkHidden("buildkit-oci-layout-dir-clear")
 	}
 }
 

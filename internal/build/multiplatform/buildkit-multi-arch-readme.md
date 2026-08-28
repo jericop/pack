@@ -344,6 +344,38 @@ the unit/on-disk tests.
 **Status:** experimental. Use for evaluation, not production. This is the long-term, tag-free
 approach; the Dockerfile MVP with intermediate tags is the interim demonstration.
 
+**Output directory & cleanup (debugging aid).** By default, the per-arch OCI layout artifacts are
+written to a temporary directory that pack **removes after the build** (even on failure). There is
+no user-facing output location in the default flow — the artifacts are an implementation detail.
+
+For debugging while the feature is experimental, you can keep the artifacts on disk:
+
+- `--buildkit-oci-layout-dir <path>`: write the per-arch OCI layout artifacts under `<path>`. Pack
+  creates a **unique per-build subdirectory** `<path>/build-<build-id>` for each run, so repeated
+  builds into the same `<path>` never mix artifacts. When this flag is set, pack **does not clean
+  up** the artifacts — you own their removal.
+- `--buildkit-oci-layout-dir-clear`: clear `<path>` before the build starts (requires
+  `--buildkit-oci-layout-dir`). Use this when you want a guaranteed clean slate and are fine with
+  pack wiping the directory's contents first.
+
+Both flags apply only to `--buildkit-export-mode=oci-layout`. Example — build without publishing
+and keep the layouts to inspect them:
+
+```bash
+pack build registry.example.com/myapp:latest \
+  --path ./app \
+  --builder jericop/ubuntu-noble-builder:skip-chown-poc \
+  --platforms linux/amd64,linux/arm64 \
+  --buildkit \
+  --trust-builder \
+  --buildkit-builder pack-multiplatform \
+  --build-backend buildkit-llb \
+  --buildkit-export-mode oci-layout \
+  --buildkit-oci-layout-dir ./oci-out \
+  --buildkit-oci-layout-dir-clear
+# artifacts kept at ./oci-out/build-<id>/oci-store-<os>-<arch>/ for inspection
+```
+
 ## Prerequisites
 
 - Docker with BuildKit support (Docker Engine 23.0+)
@@ -406,6 +438,8 @@ This forces a completely fresh build with no cached state from any source.
 | `--buildkit-cache-from` | External cache source for buildkit |
 | `--buildkit-cache-to` | External cache destination for buildkit |
 | `--buildkit-export-mode` | Export mode: `registry` (default) or `oci-layout` (LLB backend only, experimental — eliminates intermediate per-arch tags) |
+| `--buildkit-oci-layout-dir` | [oci-layout mode] Directory to write per-arch OCI layout artifacts to (a unique `build-<id>` subdirectory is created under it). Opt-in debugging aid: when set, artifacts are KEPT and you own cleanup. When unset (default), a temp dir is used and removed after the build. |
+| `--buildkit-oci-layout-dir-clear` | [oci-layout mode] Clear `--buildkit-oci-layout-dir` before the build starts. Requires `--buildkit-oci-layout-dir`. |
 
 ## Troubleshooting
 
