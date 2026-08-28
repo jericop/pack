@@ -1,0 +1,138 @@
+# Fork-only release pipeline (jericop/pack).
+#
+# A slim, Linux-only alternative to the upstream `build.yml` for cutting
+# experimental fork releases without spending macOS/Windows runner minutes.
+# It runs unit tests on Linux, builds the linux/amd64 + linux/arm64 pack
+# binaries, and creates a DRAFT GitHub Release in this repo. Publishing that
+# draft triggers `delivery-docker.yml` (which pushes to docker.io/${DOCKERHUB_ORG}/pack).
+#
+# Triggered by pushing a branch named `release/<version>` (the version is
+# derived from the branch name, matching upstream's convention) or manually via
+# workflow_dispatch. The other upstream workflows are disabled for this fork;
+# see .kiro/steering/fork-release-process.md.
+name: fork-release
+
+on:
+  push:
+    branches:
+      - 'release/**'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Release version (without leading v), e.g. 0.0.1-buildkit-poc'
+        required: true
+
+jobs:
+  unit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up go
+        uses: actions/setup-go@v6
+        with:
+          check-latest: true
+          go-version-file: 'go.mod'
+      - name: Set up go env
+        run: |
+          echo "GOPATH=$(go env GOPATH)" >> $GITHUB_ENV
+          echo "$(go env GOPATH)/bin" >> $GITHUB_PATH
+        shell: bash
+      - name: Unit tests (Linux, Docker available)
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: make unit
+
+  release:
+    needs: unit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up go
+        uses: actions/setup-go@v6
+        with:
+          check-latest: true
+          go-version-file: 'go.mod'
+      - name: Derive pack version
+        shell: bash
+        run: |
+          if [ -n "${{ github.event.inputs.version }}" ]; then
+            version="${{ github.event.inputs.version }}"
+          else
+            [[ $GITHUB_REF =~ ^refs\/heads\/release\/(.*)$ ]] && version=${BASH_REMATCH[1]}
+          fi
+          if [[ -z "${version}" ]]; then
+            echo "ERROR: pack version not detected (expected a release/<version> branch or a workflow_dispatch version input)."
+            exit 1
+          fi
+          echo "PACK_VERSION=${version}" >> $GITHUB_ENV
+          echo "Derived PACK_VERSION=${version}"
+      - name: Build linux binaries (amd64, arm64)
+        env:
+          PACK_BUILD: ${{ github.run_number }}
+        run: |
+          set -euo pipefail
+          for arch in amd64 arm64; do
+            echo "=====> Building linux/${arch}"
+            env PACK_VERSION="${PACK_VERSION}" GOOS=linux GOARCH="${arch}" make build
+            mkdir -p "dist/linux-${arch}"
+            mv out/pack "dist/linux-${arch}/pack"
+          done
+      - name: Package artifacts
+        shell: bash
+        run: |
+          set -euo pipefail
+          package() {
+            local arch="$1" label="$2"
+            chmod +x "dist/linux-${arch}/pack"
+            local filename="pack-v${PACK_VERSION}-${label}.tgz"
+            tar -C "dist/linux-${arch}" -vzcf "${filename}" pack
+            shasum -a 256 "${filename}" > "${filename}.sha256"
+          }
+          package amd64 linux
+          package arm64 linux-arm64
+          ls -la pack-v${PACK_VERSION}-*
+      - name: Extract pack help
+        id: pack_help
+        run: |
+          chmod +x dist/linux-amd64/pack
+          DELIMITER="$(uuidgen)"
+          echo "help<<${DELIMITER}" >> $GITHUB_OUTPUT
+          ./dist/linux-amd64/pack --help >> $GITHUB_OUTPUT || true
+          echo "${DELIMITER}" >> $GITHUB_OUTPUT
+      - name: Create Draft Release
+        uses: softprops/action-gh-release@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          target_commitish: ${{ github.sha }}
+          tag_name: v${{ env.PACK_VERSION }}
+          name: pack v${{ env.PACK_VERSION }}
+          draft: true
+          prerelease: true
+          files: pack-v${{ env.PACK_VERSION }}-*
+          body: |
+            ## Experimental fork build (jericop/pack)
+
+            This is an experimental build of `pack` from the `jericop/pack` fork
+            containing the BuildKit LLB OCI-layout multi-arch work. It is NOT an
+            official Cloud Native Buildpacks release.
+
+            Linux binaries only (amd64, arm64). The multi-arch Docker image is
+            published to Docker Hub (org `jericop` by default, configurable via
+            the `DOCKERHUB_ORG` repo variable) when this release is published
+            (see `delivery-docker.yml`).
+
+            ### Install (Linux)
+
+            ```bash
+            # amd64
+            (curl -sSL "https://github.com/${{ github.repository }}/releases/download/v${{ env.PACK_VERSION }}/pack-v${{ env.PACK_VERSION }}-linux.tgz" | sudo tar -C /usr/local/bin/ --no-same-owner -xzv pack)
+            # arm64
+            (curl -sSL "https://github.com/${{ github.repository }}/releases/download/v${{ env.PACK_VERSION }}/pack-v${{ env.PACK_VERSION }}-linux-arm64.tgz" | sudo tar -C /usr/local/bin/ --no-same-owner -xzv pack)
+            ```
+
+            ### `pack --help`
+
+            ```text
+            ${{ steps.pack_help.outputs.help }}
+            ```
