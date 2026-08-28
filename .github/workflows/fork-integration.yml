@@ -107,7 +107,7 @@ jobs:
             --bootstrap
           docker buildx inspect "${BUILDER_NAME}"
 
-      - name: Fetch sample app (paketo-buildpacks/samples: go/no-imports)
+      - name: 'Fetch sample app (paketo-buildpacks/samples: go/no-imports)'
         id: sample
         run: |
           set -euo pipefail
