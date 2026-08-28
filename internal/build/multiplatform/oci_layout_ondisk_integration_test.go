@@ -74,10 +74,16 @@ const (
 	envPlatforms = "PACK_TEST_PLATFORMS"
 	// envPlatformAPI overrides the CNB Platform API version.
 	envPlatformAPI = "PACK_TEST_PLATFORM_API"
+	// envRunImage overrides the run image the analyzer resolves in OCI layout
+	// mode. The lifecycle needs an explicit -run-image in layout mode (it has no
+	// -pull-run-image flag), matching the pr-compliance-app CI which passes
+	// --run-image paketobuildpacks/ubuntu-noble-run-tiny:latest.
+	envRunImage = "PACK_TEST_RUN_IMAGE"
 
 	defaultBuildkitBuilder = "pack-multiplatform"
 	defaultPlatforms       = "linux/amd64,linux/arm64"
 	defaultPlatformAPI     = "0.12"
+	defaultRunImage        = "paketobuildpacks/ubuntu-noble-run-tiny:latest"
 )
 
 func TestOCILayoutOnDiskIntegration(t *testing.T) {
@@ -216,8 +222,12 @@ func assertPerArchLayout(t *testing.T, res PlatformBuildResult) {
 // unprivileged flags per phase; here we only provide the base binary + args and
 // the target image name (substituted with the per-arch tag by the backend).
 func defaultLifecyclePhases(imageName string) []PhaseCommand {
+	runImage := envOrDefault(envRunImage, defaultRunImage)
 	return []PhaseCommand{
-		{Name: "analyzer", Binary: "/cnb/lifecycle/analyzer", Args: []string{imageName}},
+		// The analyzer needs an explicit run image in OCI layout mode (this
+		// lifecycle has no -pull-run-image flag), so pass -run-image just like
+		// pack's --run-image does on the real CLI path.
+		{Name: "analyzer", Binary: "/cnb/lifecycle/analyzer", Args: []string{"-run-image", runImage, imageName}},
 		{Name: "detector", Binary: "/cnb/lifecycle/detector", Args: []string{"-app", "/workspace"}},
 		{Name: "restorer", Binary: "/cnb/lifecycle/restorer", Args: []string{"-cache-dir", "/cache"}},
 		{Name: "builder", Binary: "/cnb/lifecycle/builder", Args: []string{"-app", "/workspace"}},

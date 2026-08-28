@@ -113,9 +113,13 @@ func testLLBBackendInternal(t *testing.T, when spec.G, it spec.S) {
 				baseOpts.ExportMode = ExportOCILayout
 			})
 
-			it("configures the analyzer with -layout -layout-dir /output -pull-run-image and -skip-chown", func() {
+			it("configures the analyzer with -layout -layout-dir /output and -skip-chown (no -pull-run-image)", func() {
+				// The run image is supplied by the analyzer's own -run-image arg
+				// (pack --run-image), matching the Dockerfile backend. This
+				// lifecycle has no -pull-run-image flag, so it must NOT be added.
 				args := buildLifecyclePhaseArgs(baseOpts, "analyzer", perArchTag)
-				h.AssertSliceContains(t, args, "-layout", "-layout-dir", "/output", "-pull-run-image", "-skip-chown")
+				h.AssertSliceContains(t, args, "-layout", "-layout-dir", "/output", "-skip-chown")
+				h.AssertSliceNotContains(t, args, "-pull-run-image")
 			})
 
 			it("configures the exporter with -layout -layout-dir /output and -skip-chown", func() {
@@ -123,26 +127,14 @@ func testLLBBackendInternal(t *testing.T, when spec.G, it spec.S) {
 				h.AssertSliceContains(t, args, "-layout", "-layout-dir", "/output", "-skip-chown")
 			})
 
-			it("does not add -pull-run-image to the exporter (only the analyzer pulls the run image)", func() {
-				// NOTE (Task 4 sub-item 3): the task text lists all four flags
-				// (-layout -layout-dir /output -pull-run-image -skip-chown) on "the
-				// exporter", but the lifecycle's actual contract splits them: the
-				// ANALYZER is what self-populates (pulls) the run image inside
-				// BuildKit, so -pull-run-image belongs on the analyzer (FR-3). The
-				// exporter only WRITES the layout, so it carries -layout
-				// -layout-dir /output -skip-chown but NOT -pull-run-image. Moving
-				// -pull-run-image to the exporter would be wrong for the lifecycle.
-				args := buildLifecyclePhaseArgs(baseOpts, "exporter", perArchTag)
-				h.AssertSliceNotContains(t, args, "-pull-run-image")
-			})
-
-			it("puts -pull-run-image on the analyzer only (documents the analyzer/exporter split)", func() {
-				// Verify the split explicitly: exactly the analyzer carries
-				// -pull-run-image; no other lifecycle phase does. This documents WHY
-				// the exporter itself does not carry -pull-run-image (the Task 4
-				// text/lifecycle-contract discrepancy) as a locked-in invariant.
-				h.AssertSliceContains(t, buildLifecyclePhaseArgs(baseOpts, "analyzer", perArchTag), "-pull-run-image")
-				for _, phase := range []string{"detector", "restorer", "builder", "exporter"} {
+			it("never adds -pull-run-image to any lifecycle phase (this lifecycle has no such flag)", func() {
+				// The patched lifecycle bundled in the builder image does not
+				// define -pull-run-image (it errors "flag provided but not
+				// defined"). The run image must instead be provided via the
+				// analyzer's -run-image arg, exactly as the Dockerfile backend
+				// (convertToOCILayoutArgs) does. Lock in that NO phase carries
+				// -pull-run-image.
+				for _, phase := range []string{"analyzer", "detector", "restorer", "builder", "exporter"} {
 					h.AssertSliceNotContains(t, buildLifecyclePhaseArgs(baseOpts, phase, perArchTag), "-pull-run-image")
 				}
 			})
