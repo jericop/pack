@@ -121,42 +121,63 @@ jobs:
           echo "Using sample app at ${app_path}"
           ls -la "${app_path}"
 
-      - name: Compute ttl.sh image ref
-        id: ref
+      # Resolve the effective config into step outputs. workflow_dispatch inputs
+      # (empty on a push event) win when set; otherwise the DEFAULT_* env vars
+      # apply. Done in the shell with ${VAR:-default} because GitHub Actions does
+      # not allow the `env` context inside a step-level `env:`/`if:` expression.
+      - name: Resolve integration config
+        id: cfg
+        env:
+          INPUT_BUILDER_IMAGE: ${{ github.event.inputs.builder_image }}
+          INPUT_PLATFORMS: ${{ github.event.inputs.platforms }}
+          INPUT_RUN_REGISTRY_TEST: ${{ github.event.inputs.run_registry_test }}
+          INPUT_REGISTRY_BASE: ${{ github.event.inputs.registry_base }}
+          INPUT_TTL: ${{ github.event.inputs.ttl }}
         run: |
           set -euo pipefail
-          base="${{ github.event.inputs.registry_base || env.DEFAULT_REGISTRY_BASE }}"
-          ttl="${{ github.event.inputs.ttl || env.DEFAULT_TTL }}"
+          builder_image="${INPUT_BUILDER_IMAGE:-$DEFAULT_BUILDER_IMAGE}"
+          platforms="${INPUT_PLATFORMS:-$DEFAULT_PLATFORMS}"
+          run_registry_test="${INPUT_RUN_REGISTRY_TEST:-$DEFAULT_RUN_REGISTRY_TEST}"
+          base="${INPUT_REGISTRY_BASE:-$DEFAULT_REGISTRY_BASE}"
+          ttl="${INPUT_TTL:-$DEFAULT_TTL}"
           # Unique, non-guessable-ish name per run so runs never collide.
           uniq="jericop-pack-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
           if [[ "${base}" == "ttl.sh" ]]; then
-            ref="${base}/${uniq}:${ttl}"
+            registry_ref="${base}/${uniq}:${ttl}"
           else
-            ref="${base}/${uniq}:latest"
+            registry_ref="${base}/${uniq}:latest"
           fi
-          echo "registry_ref=${ref}" >> "$GITHUB_OUTPUT"
-          echo "Tier 3 registry ref: ${ref}"
+          {
+            echo "builder_image=${builder_image}"
+            echo "platforms=${platforms}"
+            echo "run_registry_test=${run_registry_test}"
+            echo "registry_ref=${registry_ref}"
+          } >> "$GITHUB_OUTPUT"
+          echo "builder_image=${builder_image}"
+          echo "platforms=${platforms}"
+          echo "run_registry_test=${run_registry_test}"
+          echo "Tier 3 registry ref: ${registry_ref}"
 
       - name: Run Tier 2 on-disk integration tests (no registry)
         env:
           PACK_TEST_BUILDKIT_ENABLED: '1'
           PACK_TEST_BUILDKIT_BUILDER: ${{ env.BUILDER_NAME }}
-          PACK_TEST_BUILDER_IMAGE: ${{ github.event.inputs.builder_image || env.DEFAULT_BUILDER_IMAGE }}
+          PACK_TEST_BUILDER_IMAGE: ${{ steps.cfg.outputs.builder_image }}
           PACK_TEST_APP_PATH: ${{ steps.sample.outputs.app_path }}
-          PACK_TEST_PLATFORMS: ${{ github.event.inputs.platforms || env.DEFAULT_PLATFORMS }}
+          PACK_TEST_PLATFORMS: ${{ steps.cfg.outputs.platforms }}
         run: |
           go test -v -count=1 -timeout=30m ./internal/build/multiplatform/ \
             -run 'TestOCILayoutOnDiskIntegration|TestOCILayoutParityIntegration|TestOCILayoutRebaseIntegration'
 
       - name: Run Tier 3 registry integration test (ttl.sh)
-        if: ${{ (github.event.inputs.run_registry_test || env.DEFAULT_RUN_REGISTRY_TEST) == 'true' }}
+        if: ${{ steps.cfg.outputs.run_registry_test == 'true' }}
         env:
           PACK_TEST_REGISTRY_ENABLED: '1'
-          PACK_TEST_REGISTRY_REF: ${{ steps.ref.outputs.registry_ref }}
+          PACK_TEST_REGISTRY_REF: ${{ steps.cfg.outputs.registry_ref }}
           PACK_TEST_BUILDKIT_BUILDER: ${{ env.BUILDER_NAME }}
-          PACK_TEST_BUILDER_IMAGE: ${{ github.event.inputs.builder_image || env.DEFAULT_BUILDER_IMAGE }}
+          PACK_TEST_BUILDER_IMAGE: ${{ steps.cfg.outputs.builder_image }}
           PACK_TEST_APP_PATH: ${{ steps.sample.outputs.app_path }}
-          PACK_TEST_PLATFORMS: ${{ github.event.inputs.platforms || env.DEFAULT_PLATFORMS }}
+          PACK_TEST_PLATFORMS: ${{ steps.cfg.outputs.platforms }}
         run: |
           go test -v -count=1 -timeout=30m ./internal/build/multiplatform/ \
             -run 'TestOCILayoutRegistryIntegration'
