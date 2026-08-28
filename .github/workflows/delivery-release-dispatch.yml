@@ -1,12 +1,16 @@
 name: delivery / release-dispatch
 
+# DISABLED in this fork. Upstream uses this to notify buildpacks/* repos when a
+# new pack is released. A personal fork must NOT dispatch to the upstream org,
+# so the automatic `release: released` trigger is removed and this workflow is
+# manual-only (workflow_dispatch) and gated to never run unless explicitly
+# re-enabled by setting the ENABLE_RELEASE_DISPATCH repo variable to 'true'.
 on:
-  release:
-    types:
-      - released
+  workflow_dispatch: {}
 
 jobs:
   send-release-dispatch:
+    if: ${{ vars.ENABLE_RELEASE_DISPATCH == 'true' }}
     runs-on: ubuntu-latest
     strategy:
       matrix:

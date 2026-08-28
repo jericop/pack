@@ -1,9 +1,9 @@
 name: delivery / archlinux
 
+# DISABLED in this fork. Publishes to the upstream AUR using secrets a fork does
+# not have. The automatic `release: released` trigger is removed (manual-only)
+# and the job is gated behind ENABLE_PACKAGE_DELIVERY.
 on:
-  release:
-    types:
-      - released
   workflow_dispatch:
     inputs:
       tag_name:
@@ -12,6 +12,7 @@ on:
 
 jobs:
   pack-cli-bin:
+    if: ${{ vars.ENABLE_PACKAGE_DELIVERY == 'true' }}
     runs-on: ubuntu-latest
     env:
       PACKAGE_NAME: pack-cli-bin
