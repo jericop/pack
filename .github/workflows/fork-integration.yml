@@ -31,6 +31,16 @@
 name: fork-integration
 
 on:
+  # Run automatically on new commits pushed to the working branch(es). On a push
+  # event there are no workflow inputs, so each step resolves its value from the
+  # DEFAULT_* env vars below (github.event.inputs.* is empty on push).
+  #
+  # NOTE: this builds multi-arch (arm64 under QEMU emulation) and pushes to
+  # ttl.sh on every push — a full run takes several minutes. Narrow `branches`
+  # or `paths` below if it becomes too heavy.
+  push:
+    branches:
+      - 'buildkit-multi-arc-poc'
   workflow_dispatch:
     inputs:
       builder_image:
@@ -60,6 +70,13 @@ env:
   # Sample app: paketo-buildpacks/samples, the go/no-imports app.
   SAMPLES_REPO: https://github.com/paketo-buildpacks/samples
   SAMPLE_APP_SUBDIR: go/no-imports
+  # Defaults used when the workflow runs on `push` (no workflow_dispatch inputs).
+  # workflow_dispatch inputs override these via `${{ github.event.inputs.X || env.DEFAULT_X }}`.
+  DEFAULT_BUILDER_IMAGE: 'jericop/ubuntu-noble-builder:skip-chown-poc'
+  DEFAULT_PLATFORMS: 'linux/amd64,linux/arm64'
+  DEFAULT_RUN_REGISTRY_TEST: 'true'
+  DEFAULT_REGISTRY_BASE: 'ttl.sh'
+  DEFAULT_TTL: '24h'
 
 jobs:
   integration:
@@ -108,8 +125,8 @@ jobs:
         id: ref
         run: |
           set -euo pipefail
-          base="${{ github.event.inputs.registry_base }}"
-          ttl="${{ github.event.inputs.ttl }}"
+          base="${{ github.event.inputs.registry_base || env.DEFAULT_REGISTRY_BASE }}"
+          ttl="${{ github.event.inputs.ttl || env.DEFAULT_TTL }}"
           # Unique, non-guessable-ish name per run so runs never collide.
           uniq="jericop-pack-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
           if [[ "${base}" == "ttl.sh" ]]; then
@@ -124,22 +141,22 @@ jobs:
         env:
           PACK_TEST_BUILDKIT_ENABLED: '1'
           PACK_TEST_BUILDKIT_BUILDER: ${{ env.BUILDER_NAME }}
-          PACK_TEST_BUILDER_IMAGE: ${{ github.event.inputs.builder_image }}
+          PACK_TEST_BUILDER_IMAGE: ${{ github.event.inputs.builder_image || env.DEFAULT_BUILDER_IMAGE }}
           PACK_TEST_APP_PATH: ${{ steps.sample.outputs.app_path }}
-          PACK_TEST_PLATFORMS: ${{ github.event.inputs.platforms }}
+          PACK_TEST_PLATFORMS: ${{ github.event.inputs.platforms || env.DEFAULT_PLATFORMS }}
         run: |
           go test -v -count=1 -timeout=30m ./internal/build/multiplatform/ \
             -run 'TestOCILayoutOnDiskIntegration|TestOCILayoutParityIntegration|TestOCILayoutRebaseIntegration'
 
       - name: Run Tier 3 registry integration test (ttl.sh)
-        if: ${{ github.event.inputs.run_registry_test == 'true' }}
+        if: ${{ (github.event.inputs.run_registry_test || env.DEFAULT_RUN_REGISTRY_TEST) == 'true' }}
         env:
           PACK_TEST_REGISTRY_ENABLED: '1'
           PACK_TEST_REGISTRY_REF: ${{ steps.ref.outputs.registry_ref }}
           PACK_TEST_BUILDKIT_BUILDER: ${{ env.BUILDER_NAME }}
-          PACK_TEST_BUILDER_IMAGE: ${{ github.event.inputs.builder_image }}
+          PACK_TEST_BUILDER_IMAGE: ${{ github.event.inputs.builder_image || env.DEFAULT_BUILDER_IMAGE }}
           PACK_TEST_APP_PATH: ${{ steps.sample.outputs.app_path }}
-          PACK_TEST_PLATFORMS: ${{ github.event.inputs.platforms }}
+          PACK_TEST_PLATFORMS: ${{ github.event.inputs.platforms || env.DEFAULT_PLATFORMS }}
         run: |
           go test -v -count=1 -timeout=30m ./internal/build/multiplatform/ \
             -run 'TestOCILayoutRegistryIntegration'
