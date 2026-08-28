@@ -453,7 +453,13 @@ func phase1ExportEntry(store content.Store, perArchTag string) []client.ExportEn
 	return []client.ExportEntry{{
 		Type:        client.ExporterOCI,
 		OutputStore: store,
-		Attrs:       map[string]string{"name": perArchTag},
+		// tar=false makes the daemon's OCI exporter write the layout to the
+		// attached content store (OutputStore) instead of streaming a tarball to
+		// the client over filesync. Without it the exporter defaults to tar=true
+		// and fails with "method /moby.filesync.v1.FileSend/diffcopy not supported
+		// by the client" because we register a content-store session, not a
+		// filesync target.
+		Attrs: map[string]string{"name": perArchTag, "tar": "false"},
 	}}
 }
 

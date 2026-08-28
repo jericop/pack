@@ -373,6 +373,9 @@ func testLLBBackendInternal(t *testing.T, when spec.G, it spec.S) {
 			h.AssertEq(t, len(entries), 1)
 			h.AssertEq(t, entries[0].Type, client.ExporterOCI)
 			h.AssertNotNil(t, entries[0].OutputStore)
+			// tar=false routes the export to the content store instead of a
+			// filesync tar stream (avoids "FileSend/diffcopy not supported").
+			h.AssertEq(t, entries[0].Attrs["tar"], "false")
 		})
 
 		it("does not set push=true (Phase 1 writes locally, never to a registry)", func() {
