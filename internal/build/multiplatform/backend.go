@@ -21,6 +21,14 @@ const (
 	// BackendBuildkitLLB uses the BuildKit Go SDK to construct and solve an LLB graph directly.
 	BackendBuildkitLLB BackendType = "buildkit-llb"
 
+	// BackendBuildkitNative uses the BuildKit Go SDK to run detector + builder +
+	// the lifecycle's emit-mode as RUN steps (producing the emit contract inside
+	// BuildKit), then assembles the final CNB app image natively in BuildKit
+	// (FROM run-image + add the emitted layers + apply the emitted config) and
+	// exports it via BuildKit's native multi-platform image export. EXPERIMENTAL
+	// (Option C: buildkit-native-export). No layer-data egress to the host.
+	BackendBuildkitNative BackendType = "buildkit-native"
+
 	// BackendAuto auto-detects the best available backend.
 	BackendAuto BackendType = "auto"
 )

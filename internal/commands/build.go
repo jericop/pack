@@ -306,7 +306,7 @@ This option may set DOCKER_HOST environment variable for the build container if 
 	cmd.Flags().StringVar(&buildFlags.Platform, "platform", "", `Platform to build on (e.g., "linux/amd64").`)
 	cmd.Flags().StringVar(&buildFlags.Platforms, "platforms", "", `Comma-separated list of target platforms for multi-architecture builds (e.g., "linux/amd64,linux/arm64"). Requires --buildkit. Requires --publish or produces local OCI layouts.`)
 	cmd.Flags().BoolVar(&buildFlags.Buildkit, "buildkit", false, `[experimental] Use BuildKit backend for building. Required for multi-platform builds.`)
-	cmd.Flags().StringVar(&buildFlags.BuildBackend, "build-backend", "", `Build backend for multi-platform builds. Values: "buildkit-dockerfile" (default), "buildkit-llb".`)
+	cmd.Flags().StringVar(&buildFlags.BuildBackend, "build-backend", "", `Build backend for multi-platform builds. Values: "buildkit-dockerfile" (default), "buildkit-llb", "buildkit-native" (experimental).`)
 	cmd.Flags().StringVar(&buildFlags.BuildkitBuilder, "buildkit-builder", "", `Name of the buildx builder to use for multi-platform builds (default: current buildx default).`)
 	cmd.Flags().StringArrayVar(&buildFlags.BuildkitCacheFrom, "buildkit-cache-from", nil, `External cache source for buildkit (e.g., "type=registry,ref=myapp-cache:latest").`)
 	cmd.Flags().StringArrayVar(&buildFlags.BuildkitCacheTo, "buildkit-cache-to", nil, `External cache destination for buildkit (e.g., "type=registry,ref=myapp-cache:latest,mode=max").`)

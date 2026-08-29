@@ -17,8 +17,11 @@ func NewBackend(ctx context.Context, backendType BackendType, logger logging.Log
 	case BackendBuildkitLLB:
 		return NewLLBBackend(logger, buildkitOpts), nil
 
+	case BackendBuildkitNative:
+		return NewNativeBackend(logger, buildkitOpts), nil
+
 	default:
-		return nil, fmt.Errorf("unknown build backend %q; valid options: %s, %s",
-			backendType, BackendBuildkitDockerfile, BackendBuildkitLLB)
+		return nil, fmt.Errorf("unknown build backend %q; valid options: %s, %s, %s",
+			backendType, BackendBuildkitDockerfile, BackendBuildkitLLB, BackendBuildkitNative)
 	}
 }
