@@ -181,7 +181,17 @@ func (e *Executor) buildAllPlatforms(ctx context.Context, opts MultiPlatformBuil
 
 	// Prefer single-invocation multi-platform build — buildkit builds all arches
 	// in parallel and pushes the manifest list atomically.
-	if caps.SupportsParallelArch && len(opts.Platforms) > 1 {
+	//
+	// Route through BuildMultiPlatform when there are multiple platforms. Also route
+	// SINGLE-platform builds of the buildkit-native backend through it, so the image
+	// is pushed under the FINAL manifest-list name (buildkit produces a single-arch
+	// index at the final tag) rather than the per-arch-suffixed name the legacy
+	// sequential path (platformOptsFor) uses — otherwise a native single-arch build
+	// would leave the final tag uncreated. Scoped to the native backend by name to
+	// avoid changing the LLB backend's established single-arch behavior.
+	multi := len(opts.Platforms) > 1
+	nativeSingle := e.backend.Name() == string(BackendBuildkitNative)
+	if caps.SupportsParallelArch && (multi || nativeSingle) {
 		if mp, ok := e.backend.(MultiPlatformBuilder); ok {
 			return mp.BuildMultiPlatform(ctx, opts.Platforms, e.platformOptsForMulti(opts))
 		}

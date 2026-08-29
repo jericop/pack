@@ -97,6 +97,66 @@ This gets us the best of both worlds:
 - No data duplication (BuildKit's content store is the single source of truth)
 - Fully opt-in (without the layout flag, lifecycle exports to daemon/registry as today)
 
+## THE CORE TRADEOFF: who assembles the final image, and where the diffIDs come from
+
+cnbp proved BuildKit CAN build CNB images. The reason we did NOT simply reuse cnbp's
+approach as-is — and why the emit-mode hybrid is a useful combination — comes down to
+ONE unavoidable fact about BuildKit, plus cnbp's fidelity gaps.
+
+### The unavoidable BuildKit fact (verified in moby/buildkit v0.32.2)
+
+BuildKit's image exporter ALWAYS derives the final image's layer diffIDs from the
+LLB result ref's ACTUAL layer chain (`exporter/containerimage/writer.go`
+`patchImageConfig` builds `rootfs.DiffIDs` from the exported descriptors'
+`LabelUncompressed` annotations). A frontend can ONLY return a solved LLB state; it
+CANNOT hand BuildKit pre-built layer blobs/diffIDs through the gateway result
+(`frontend/gateway/client` `Reference` exposes only `ToState/Evaluate/ReadFile/
+StatFile/ReadDir`). `ExporterImageBaseConfigKey` does not substitute blobs either —
+it only retains base timestamps/history for reproducibility.
+
+Consequence: whenever the frontend BUILDS layers as LLB (COPY, `RUN tar -xf`, etc.),
+BuildKit snapshots the filesystem and assigns ITS OWN diffIDs. Those diffIDs will NOT
+byte-match the diffIDs the lifecycle computed for the "same" layer, because the
+re-created tar is not byte-identical (header ordering, timestamps, whiteouts, xattrs).
+
+So there are only two ways to get an image whose diffIDs match what the CNB metadata
+claims:
+
+1. **Make the metadata match what BuildKit produced** (rewrite the metadata SHAs to
+   the produced diffIDs) — the CURRENT approach. Requires a post-push (or post-build)
+   metadata fix because the gateway can't expose produced diffIDs until export.
+2. **Make BuildKit's layers BE the lifecycle's exact layers** (import a
+   lifecycle-produced OCI layout via `llb.OCILayout`, which preserves original
+   diffIDs) — Option 2a. Requires the lifecycle to materialize a full OCI layout on
+   disk in-build and to pull the run image into that layout (`-pull-run-image`).
+
+### cnbp's fidelity gaps (why we can't just use cnbp's custom export)
+
+cnbp REPLACED the lifecycle exporter with hand-written LLB COPY logic. That threw away
+CNB fidelity: no proper `io.buildpacks.lifecycle.metadata`, no layer reuse from a
+previous image, no SBOM, no process types, Platform API 0.5. Rebuild/rebase/patching
+depend on exactly that metadata. So a faithful solution must KEEP the lifecycle's
+export logic (its metadata/SBOM/reuse computation), not reimplement it.
+
+### The tradeoff table
+
+| | cnbp (custom LLB export) | Emit + re-extract + metadata rewrite (current) | Lifecycle layout + `llb.OCILayout` import (2a) | Lifecycle emits metadata FROM BuildKit output (2c — proposed) |
+|---|---|---|---|---|
+| CNB fidelity (metadata/SBOM/reuse) | LOST | full | full | full |
+| Post-build image mutation | none | REQUIRED (metadata SHA rewrite) | none | none (metadata generated to match) |
+| diffID source | BuildKit | BuildKit (metadata patched to match) | lifecycle layout (preserved) | BuildKit (metadata generated to match) |
+| In-build disk materialization | some | none | FULL OCI layout on disk | none |
+| Run image pulled in-build | yes | no (llb.Image base) | yes (`-pull-run-image`) | no (llb.Image base) |
+| Data copying / emulation waste | moderate | LOW | HIGH (materialize + import) | LOW |
+| Works WITH BuildKit vs against | with | mostly | fights it (disk round-trip) | with |
+
+The emit-mode hybrid's value: it KEEPS full lifecycle fidelity (unlike cnbp) AND
+keeps layer data in BuildKit's content store (no disk materialization, unlike 2a).
+Its cost is the metadata-SHA reconciliation, because BuildKit assigns the diffIDs.
+Option 2c (below, being explored) aims to keep the hybrid's efficiency AND remove the
+mutation by having the lifecycle GENERATE the metadata from BuildKit's produced
+diffIDs instead of patching it after the fact.
+
 ## File Structure
 
 ```

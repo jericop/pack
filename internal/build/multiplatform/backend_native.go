@@ -13,6 +13,7 @@ import (
 
 	"github.com/buildpacks/lifecycle/buildkit/cnbfrontend"
 	"github.com/buildpacks/lifecycle/phase/emit"
+	"github.com/buildpacks/lifecycle/phase/finalize"
 
 	"github.com/buildpacks/pack/pkg/logging"
 )
@@ -358,17 +359,28 @@ func (b *NativeBackend) driveFrontend(ctx context.Context, bkClient *client.Clie
 		return nil, fmt.Errorf("buildkit-native frontend build: %w", err)
 	}
 
-	// Post-push: rewrite the io.buildpacks.lifecycle.metadata per-layer SHAs to the
-	// image's ACTUAL (BuildKit-recomputed) diffIDs, so the metadata is consistent
-	// with the image (needed for the analyzer's previous-image restore on rebuilds
-	// and for buildpack-layer patching). This mutates only the config+manifest
-	// (layer blobs are unchanged -> no re-upload, no layer-data egress).
+	// Post-push FINALIZE (Option A): author the correct io.buildpacks.lifecycle.metadata
+	// on the pushed image from its ACTUAL produced layer diffIDs + the
+	// io.buildpacks.buildkit.native.build-metadata label the build attached. This is
+	// the lifecycle's finalize LIBRARY (consumed here like phase.Rebaser); it mutates
+	// ONLY the image config+manifest (+ index) — no layer blobs are read, added, or
+	// re-uploaded. The finalized image is rebuildable + rebaseable.
+	//
+	// The build pushed under a name reachable from BuildKit; the host-side finalize
+	// must reach the same registry by its HOST-reachable name. In local test setups
+	// these differ (container-name vs localhost) — PACK_HOST_REGISTRY_REMAP bridges
+	// it (test-env only; no-op in prod where one name works from both sides).
+	finalizeRef := applyHostRegistryRemap(opts.ImageName)
 	insecure := false
-	if reg := registryHost(opts.ImageName); reg != "" && isLikelyInsecureRegistry(reg) {
+	if reg := registryHost(finalizeRef); reg != "" && isLikelyInsecureRegistry(reg) {
 		insecure = true
 	}
-	if err := rewriteMetadataSHAs(ctx, opts.ImageName, insecure, b.logger); err != nil {
-		return nil, fmt.Errorf("rewriting lifecycle metadata SHAs: %w", err)
+	b.logger.Infof("Finalizing CNB metadata for %s", finalizeRef)
+	if err := finalize.Finalize(ctx, finalizeRef, finalize.Options{
+		Insecure: insecure,
+		Logger:   b.logger,
+	}); err != nil {
+		return nil, fmt.Errorf("finalizing CNB metadata: %w", err)
 	}
 
 	// One result per platform; all point at the pushed manifest-list name.

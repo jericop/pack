@@ -433,15 +433,15 @@ This forces a completely fresh build with no cached state from any source.
 |------|-------------|
 | `--buildkit` | Enable BuildKit backend (experimental, required for `--platforms`) |
 | `--platforms` | Comma-separated target platforms (e.g., `linux/amd64,linux/arm64`) |
-| `--build-backend` | Backend selection: `buildkit-dockerfile` (default), `buildkit-llb`, `buildkit-native` (experimental — see [BuildKit-Native Export Backend](#buildkit-native-export-backend-option-c)) |
+| `--build-backend` | Backend selection: `buildkit-dockerfile` (default), `buildkit-llb`, `buildkit-native` (experimental — see [BuildKit-Native Export Backend](#buildkit-native-export-backend-option-a--build-then-finalize)) |
 | `--buildkit-builder` | Name of the buildx builder to use |
 | `--buildkit-cache-from` | External cache source for buildkit |
 | `--buildkit-cache-to` | External cache destination for buildkit |
 | `--buildkit-export-mode` | Export mode: `registry` (default) or `oci-layout` (LLB backend only, experimental — eliminates intermediate per-arch tags) |
 | `--buildkit-oci-layout-dir` | [oci-layout mode] Directory to write per-arch OCI layout artifacts to (a unique `build-<id>` subdirectory is created under it). Opt-in debugging aid: when set, artifacts are KEPT and you own cleanup. When unset (default), a temp dir is used and removed after the build. |
 | `--buildkit-oci-layout-dir-clear` | [oci-layout mode] Clear `--buildkit-oci-layout-dir` before the build starts. Requires `--buildkit-oci-layout-dir`. |
-| `--lifecycle-image` | [buildkit-native] Emit-capable lifecycle image the frontend overlays/uses. |
-| `--buildkit-fix-remote-image-metadata` | [buildkit-native, PLANNED — not implemented] If the target image already exists remotely with invalid/stale CNB metadata, fix it in place before building (self-healing). Default off = warn and stop. |
+| `--lifecycle-image` | [buildkit-native] Emit+finalize-capable lifecycle image the build overlays/uses. |
+| `--buildkit-fix-remote-image-metadata` | [buildkit-native, PLANNED — not implemented] If the target image already exists remotely and is not yet finalized (missing/invalid CNB metadata), run finalize on it in place before building (self-healing). Default off = warn and stop. |
 
 ## Troubleshooting
 
@@ -625,323 +625,160 @@ to implement reliably.)
 > feature is confirmed working end-to-end on a real registry (Tier 3). It will document the chosen
 > env-var gating and setup at that point.
 
-## BuildKit-Native Export Backend (Option C)
+## BuildKit-Native Export Backend (Option A — build-then-finalize)
 
 > The canonical summary of this feature lives in the `buildkit-multiarch` steering
 > file (`.kiro/steering/buildkit-multiarch.md`); it is the source of truth. This
 > section is the expanded reference and is kept in sync with that steering file.
 
-**Status: experimental, opt-in, MVP validated locally.** Selected with
-`--build-backend=buildkit-native`. This is a third backend alongside the Dockerfile
-and LLB backends. Unlike those (which run the lifecycle exporter to push the final
-image), the buildkit-native backend assembles the final app image **natively inside
-BuildKit** from a run-image base, so the app/launcher/buildpack layer data never
-egresses to the host. It produces one native multi-arch image with **no
-intermediate per-arch tags**.
+**Status: experimental, opt-in, MVP validated locally (repeated rebuilds + rebases).**
+Selected with `--build-backend=buildkit-native`. A third backend alongside the
+Dockerfile and LLB backends. BuildKit BUILDS and PUSHES the app image natively (one
+multi-arch image, **no intermediate per-arch tags**, layer data never egresses to
+the host); then a lifecycle-owned FINALIZE step makes the pushed image
+buildpacks-compliant by authoring the correct CNB metadata from the image's ACTUAL
+produced layers.
+
+This design SUPERSEDES the earlier "custom gateway frontend + host-side
+metadata-SHA rewrite" approach. The decision record (with rejected alternatives and
+the BuildKit-internals reasoning) is
+`cnb-lifecycle/.kiro/specs/cnb-buildkit-frontend/spike-eliminate-metadata-rewrite.md`.
+
+### The two phases
+
+1. **Build phase (BuildKit):** run the lifecycle phases (analyzer → detector →
+   restorer → builder → exporter), assemble the app image `FROM run-image`, and let
+   BuildKit push ONE image (multi-arch = one OCI index) with no intermediate tags.
+   The build attaches a single build-phase LABEL,
+   `io.buildpacks.buildkit.native.build-metadata` (the ordered layer plan + the
+   emitted CNB labels the lifecycle computed). The image is runnable but NOT yet
+   CNB-compliant — it deliberately carries NO valid final
+   `io.buildpacks.lifecycle.metadata` yet (its intended per-layer SHAs are not the
+   diffIDs BuildKit assigns at export).
+2. **Finalize phase (lifecycle library, pack calls it):** after the push, pack calls
+   the lifecycle `phase/finalize` library (imported like `phase.Rebaser`). Finalize
+   reads the pushed image's ACTUAL produced layer diffIDs + the build-metadata label,
+   authors `io.buildpacks.lifecycle.metadata` (per-layer SHAs = produced diffIDs;
+   `RunImage.TopLayer` = the run-image boundary), removes the build-metadata label,
+   and re-pushes ONLY the image config + manifest (+ index for multi-arch). NO layer
+   blobs are read, added, removed, re-tarred, or re-uploaded.
+
+### Why authoring, not rewriting
+
+BuildKit's image exporter always derives the final layer diffIDs from what it
+actually snapshots at export; a frontend cannot inject pre-built blobs/diffIDs via
+the gateway result (verified in moby/buildkit v0.32.2). The earlier design let the
+lifecycle emit metadata with the INTENDED diffIDs, then pack REWROTE those SHAs to
+the produced ones after push — a patch of a divergence we caused. Option A instead
+never writes a wrong final label: the build carries the plan in the build-metadata
+label, and finalize AUTHORS the final metadata against the produced diffIDs the
+first time. Same tag-atomic config re-push, but it is the intended two-phase
+contract, and the CNB metadata authorship lives in the lifecycle (one source of
+truth), not duplicated in pack.
 
 ### How it differs from the other backends
 
-| | Dockerfile / LLB (registry or oci-layout) | **buildkit-native** |
+| | Dockerfile / LLB (registry or oci-layout) | **buildkit-native (Option A)** |
 |---|---|---|
-| Who assembles the final image | lifecycle **exporter** (pushes / writes OCI layout) | a **CNB BuildKit gateway frontend** assembles `FROM run-image` inside BuildKit |
-| Where layer data lives | egresses to host (registry mode) or to disk (oci-layout) | stays in BuildKit's content store (no layer egress) |
+| Who produces the layers | lifecycle exporter | lifecycle exporter (in BuildKit) |
+| Who authors final CNB metadata | lifecycle exporter | lifecycle `phase/finalize` (post-push, from produced diffIDs) |
+| Where layer data lives | egresses to host (registry) or disk (oci-layout) | stays in BuildKit's content store |
+| Post-push registry writes | none | config+manifest only (finalize); NO layer re-upload |
 | Intermediate tags | yes (registry/Dockerfile) / no (oci-layout) | no |
-| App/buildpack layer diffIDs | identical to a normal export | **recomputed** by BuildKit (differ from other modes) — see caveats |
-| Rebase support | yes | yes (validated) |
+| App/buildpack layer diffIDs | identical to a normal export | recomputed by BuildKit — finalize makes metadata match |
+| Rebuild + rebase | yes | yes (validated across repeated cycles) |
 
-### The approach (as-built)
+### CAVEAT 1 — finalize is required; on failure the image is runnable but not yet compliant
 
-The assembly is done by a **custom CNB BuildKit gateway frontend**
-(`jericop/cnb-lifecycle` package `buildkit/cnbfrontend`; prior art:
-[EricHripko/cnbp](https://github.com/EricHripko/cnbp)). Pack drives it **in-process**
-via `client.Client.Build` — no separate frontend image is required. A plain
-`client.Solve` with a raw LLB state was insufficient because it cannot set the
-output image config/labels (entrypoint/env/`io.buildpacks.lifecycle.metadata`); that
-requires the gateway result API (`exptypes.ExporterImageConfigKey`), which is why a
-frontend is used.
+Finalize is a SEPARATE registry operation after BuildKit's push (not one
+transaction). It is TAG-ATOMIC and FAILURE-SAFE: it re-pushes to the SAME tag via a
+single manifest `PUT` (index `PUT` for a manifest list), so the tag always resolves
+to either the pre-finalize or the finalized image, never a partial one. If finalize
+fails before its final `PUT`, the pushed image remains **runnable** (only its CNB
+metadata is not yet authored), so it cannot be cleanly rebuilt or rebased until
+finalized. Finalize is IDEMPOTENT — re-running it (or the next build) authors
+identical metadata. A future opt-in self-healing flow
+(`--buildkit-fix-remote-image-metadata`) can finalize a previously-interrupted image
+in place using its retained build-metadata label (see Future Work; not implemented).
 
-Per platform, the frontend:
+### CAVEAT 2 — layer diffIDs differ from other export modes
 
-1. Runs the lifecycle phases (analyzer → detector → restorer → builder) as BuildKit
-   `RUN`s on the builder base image.
-2. Runs the lifecycle exporter in **emit-mode** (`-emit-export-plan <dir>`). Emit-mode
-   does not push an image; it records the ordered layer plan + image config and
-   **persists the emitted layer tars** (see "Emit-mode" below).
-3. Resolves the run image from the analyzer-written `/layers/analyzed.toml`
-   (digest-pinned) and uses it as the `llb.Image` assembly base. The run image is
-   **never modified**.
-4. Assembles the app image by extracting **each emitted CNB layer as its own layer**
-   (one `RUN` per emitted layer, in plan order) on top of the run-image base, then
-   sets the image config/labels from the emitted `config.json`. The extraction uses
-   `tar` **from the build image** (see the run-image caveat below), not the run
-   image's own tooling.
-5. Returns per-platform refs so BuildKit exports one native multi-arch image.
+By design the app/buildpack layer diffIDs differ from a registry/oci-layout export of
+the same build (BuildKit recomputes them). This is fine: rebase depends only on the
+run-image boundary (`RunImage.TopLayer`), and finalize makes every per-layer metadata
+SHA equal the ACTUAL produced diffID, so buildpack-layer patching works too. Use the
+LLB `oci-layout` mode if you require byte-for-byte diffID parity with the other
+backends.
 
-Then, **host-side, after BuildKit pushes**, pack performs a metadata-SHA rewrite
-(see the caveat below).
+### CAVEAT 3 — run image is never assumed to have a shell or tar (MVP note)
 
-### Emit-mode: is it still "emit" if the exporter still runs Save?
-
-Yes. Emit-mode reuses the exporter unchanged; the seam is the `imgutil.Image`
-interface. The exporter's normal, unconditional `Save()` at the end of `Export()`
-**still runs** — but the image it runs against is a `RecordingImage` whose `Save()`
-writes `plan.json` + `config.json` (and copies the layer tars into the output dir)
-**instead of assembling and pushing an image**. So "emit-mode" means "the save
-operation is redirected to emit a contract," not "save is skipped." No change to
-`phase/exporter.go`.
-
-**Why emit-mode must persist layer tars:** the exporter builds each layer tar under
-a temporary artifacts directory that is deleted (`defer os.RemoveAll`) when
-`Export()` returns. The frontend reads the tars in a *later* build step (after the
-export `RUN`), by which point that temp dir is gone. So `RecordingImage.Save()`
-copies each new layer's tar into `<emit-dir>/buildkit/layers/NNN-<name>.tar` and
-records the relative path in `plan.json`. This is the one behavioral addition to
-emit-mode beyond pure recording; it does not change what a normal export does.
-
-### CAVEAT 1 — host-side metadata-SHA rewrite is required for rebuild + rebase
-
-This is the most important thing to understand about buildkit-native images.
-
-**What happens:** BuildKit computes the assembled layers' diffIDs at **export time,
-after the frontend has already returned** its result. The gateway `Reference` API
-the frontend has does **not** expose those produced diffIDs. So neither the frontend
-nor the lifecycle can write an `io.buildpacks.lifecycle.metadata` label whose
-per-layer SHAs match the image's actual layers. Left uncorrected, the metadata SHAs
-(the emit-original diffIDs) do **not** match the pushed image's real layer diffIDs.
-
-**The consequence of leaving it uncorrected:**
-- The **first** build still produces a runnable image (the app runs fine — the
-  mismatch is only in the CNB metadata label, not the runtime layers).
-- On a **rebuild**, pack's analyzer pulls the previously-pushed image as the
-  "previous image" and tries to restore layers/SBOM **by the diffIDs recorded in the
-  metadata**. Because those SHAs aren't in the image, the restore fails (this was the
-  observed "analyzer flakiness," exit 32).
-- **Buildpack-layer patching** (locating a buildpack layer by its metadata SHA to
-  replace it) also breaks, for the same reason.
-
-**The fix (implemented):** after BuildKit pushes, pack pulls only the image
-**config + manifest** (tiny — **no layer blob egress**), maps the emitted layer
-diffIDs (recorded by the frontend in a temporary
-`io.buildpacks.native.layer-order` label) to the image's actual layer diffIDs
-positionally, rewrites every per-layer SHA in `io.buildpacks.lifecycle.metadata`
-(app/sbom/launcher/config/process-types + each `buildpacks[].layers[].sha`), drops
-the temp label, and re-pushes the config + manifest (blobs unchanged). This makes
-the metadata internally consistent with the image, which:
-- fixes the analyzer's previous-image restore on rebuilds, and
-- makes buildpack-layer patching work.
-
-Handles both a single image and a multi-arch manifest list.
-
-#### What if the post-push rewrite fails (e.g. CI/CD flake)?
-
-**The pushed image is still usable to run.** The rewrite only touches the CNB
-metadata label; the runtime layers, entrypoint, and env are already correct on the
-pushed image. So a failed rewrite leaves you with a **runnable but
-not-cleanly-rebuildable / not-rebaseable** image: the next `pack build` against that
-tag would hit the analyzer previous-image restore failure, and `pack rebase` /
-buildpack-layer patching would operate on mismatched metadata.
-
-Because the rewrite reads only the config+manifest and needs no layer data, it is a
-cheap, **idempotent, re-runnable repair**. Rather than exposing this as a separate
-"fix a broken image" command (confusing to document), the planned model is
-**self-healing builds**:
-
-- On a buildkit-native build whose target ref already exists remotely, pack first
-  **inspects the existing image's metadata** for rebuild/rebase validity.
-- If it is invalid, pack **warns and stops** by default (the image is runnable but
-  not rebuildable/rebaseable).
-- If an opt-in flag (e.g. `--buildkit-fix-remote-image-metadata`) is set, pack
-  **fixes the existing image in place** (the same positional remap of
-  `io.buildpacks.lifecycle.metadata`) before proceeding. CI/CD can enable this by
-  default for hands-off recovery from a mid-build failure.
-
-For this to work, the layer ordering must survive on the pushed image. Accordingly,
-the `io.buildpacks.native.layer-order` label is a **required, durable** output of a
-buildkit-native build (it is NOT removed after the rewrite), so any buildkit-native
-image can be re-validated and healed later. This self-healing flow is **not yet
-implemented** (see Future Work + the spec follow-up tasks); the durable label is the
-prerequisite.
-
-**Behavior across repeated rebuilds and rebases** (this must keep working, not just
-the first time):
-
-- **Rebuild:** every buildkit-native build re-runs the exporter in emit-mode and the
-  frontend **re-records** `io.buildpacks.native.layer-order` from *that* build's emit
-  plan. Its contents legitimately change build-to-build (reused vs new layers
-  differ). The rewrite always maps against the current build's label, never a stale
-  one carried from the previous image. So repeated rebuilds each stay consistent.
-- **Rebase:** `pack rebase` swaps the run-image base layers and updates only the
-  run-image boundary in `io.buildpacks.lifecycle.metadata`; it does not change the
-  app/buildpack layer diffIDs, so the layer-order label stays valid without
-  regeneration and a **rebuild after a rebase** still works.
-- **Idempotency:** the rewrite / self-healing fix is idempotent — a healed image is
-  itself rebuild/rebase-capable, so the *next* cycle can self-heal too, with no drift
-  in the label across cycles.
-
-Tests for this backend must exercise **repeated** cycles (≥2 rebuilds, ≥2 rebases,
-rebuild-after-rebase, and self-heal-then-repeat), not only the first build/rebase.
-
-#### Is the metadata update atomic? What happens if it fails mid-way?
-
-**The rewrite is a build step SEPARATE from the BuildKit push, so the overall
-"build + fix" is NOT one transaction — but each registry mutation is
-tag-atomic, and a failure is safe (the image stays pullable with its old
-metadata).** Details:
-
-- **Two distinct registry operations.** BuildKit pushes the assembled image first;
-  then pack pulls the config+manifest and re-pushes the rewritten config+manifest
-  (no layer blobs). Between those two operations there is a window where the pushed
-  image has stale metadata. That window is exactly why self-healing exists.
-- **Same-tag overwrite, so failure is non-destructive.** The rewrite re-pushes to
-  the SAME tag. A registry tag update is a single manifest `PUT` that flips the tag
-  atomically — the tag points at either the old manifest or the new one, never a
-  half-written manifest. So:
-  - If the rewrite **succeeds**, the tag now points at the fixed image.
-  - If the rewrite **fails** (network blip, process dies, auth error) BEFORE the
-    final manifest `PUT`, the tag still points at the **original** pushed image. That
-    image is complete and **pullable/runnable** — only its CNB metadata label is
-    stale, so it **cannot be cleanly rebuilt or rebased** until healed. No corruption,
-    no partial image at the tag.
-- **Manifest lists (multi-arch).** Each child image is rewritten, then the index is
-  re-pushed (`WriteIndex`: child manifests first, then the index `PUT`). The index
-  tag flips on the final index `PUT`. If the process dies after some rewritten child
-  manifests are uploaded but before the index `PUT`, the tag still resolves to the
-  OLD index (old children) — consistent and pullable; the freshly-uploaded child
-  manifests are just unreferenced blobs (garbage-collected by the registry). It is
-  not a single atomic operation across all children, but the tag-visible state is
-  always one coherent index.
-- **Idempotent + self-correcting.** Because the fix reads only config+manifest and
-  keys off the durable `io.buildpacks.native.layer-order` label, re-running it on a
-  half-healed or unhealed image converges to the correct result. This is what makes
-  the build-time check + `--buildkit-fix-remote-image-metadata` self-healing flow
-  safe to enable by default in CI: a run that failed the rewrite last time is simply
-  fixed on the next build.
-
-**Net:** a failed metadata update never breaks the ability to pull/run the image; it
-only defers rebuildability/rebaseability until the next (self-healing) build. A fully
-transactional "push + rewrite in one shot" is not possible against a standard
-registry (two separate operations), so the design leans on tag-atomic overwrites +
-idempotent healing instead.
-
-### CAVEAT 2 — standalone frontend use (without pack) is first-build-only
-
-The frontend can also be published as a standalone `#syntax=`-style frontend image
-(`cmd/cnb-frontend`) and used directly (outside pack). In that mode the **host-side
-metadata rewrite does not happen** (that step lives in pack). Consequences:
-
-- The **first** build works and produces a runnable image.
-- **Rebuilds fail** the same way described in Caveat 1: the second build's analyzer
-  pulls the first image as its previous image and the metadata-SHA restore fails, so
-  subsequent builds error. Rebase would likewise operate on mismatched metadata.
-
-So standalone frontend use is fine for a one-shot build where you never rebuild or
-rebase that tag, but for the full rebuild/rebase lifecycle you need pack (or an
-equivalent post-push rewrite step). This is captured as a follow-up (a standalone
-mode that self-applies the rewrite, or documents the limitation, would make
-standalone use fully functional).
-
-### CAVEAT 3 — layer diffIDs differ from other export modes
-
-By design, the app/buildpack layer diffIDs of a buildkit-native image differ from a
-registry/oci-layout export of the same inputs (BuildKit recomputes them during
-native assembly). This is acceptable because:
-
-- **Rebase does not depend on app-layer diffID identity** — it depends only on the
-  run-image boundary (`RunImage.TopLayer`) recorded in the metadata. This was proven
-  empirically by running the real `phase.Rebaser` against a buildkit-native image
-  with recomputed diffIDs — rebase succeeds.
-- After the host-side rewrite, the metadata is internally consistent with the actual
-  layers, so buildpack-layer patching also works.
-
-If you require byte-for-byte diffID parity with the other backends, use the LLB
-`oci-layout` mode instead.
-
-### CAVEAT 4 — run image is never assumed to have a shell or tar
-
-Per-layer assembly extracts each emitted layer tar onto the run-image base. It must
-**not** assume the run image contains `/bin/sh` or `tar` — plenty of run images are
-distroless/static and have neither, and the run image is never modified regardless.
-The correct approach (and the intended implementation) is to run `tar` **from the
-build image** (which reliably ships a shell + `tar` as standard tooling) against the
-run-image rootfs, e.g. by mounting the build image's `tar` (and its libraries) in.
-Running the build image's `tar` also sidesteps the shared-library (glibc/libstdc++)
-loading problems you would hit trying to execute a run-image binary. The run image
-supplies only the base filesystem; all extraction tooling comes from the build
-image.
-
-> MVP note: the initial validation ran `tar` via the run image's own shell (the
-> ubuntu-noble run image happens to have both), which is why earlier notes mentioned
-> a "run image has sh+tar" assumption. That assumption is **not acceptable in
-> general** and is being removed in favor of build-image `tar` (tracked as a
-> required correctness item, not an optional hardening).
+The current MVP still assembles by extracting each emitted layer tar onto the
+run-image base via the run image's shell (`tar -xf`), which assumes the run image has
+`/bin/sh` + `tar` (true for ubuntu-noble). This is a KNOWN MVP limitation, not the
+target: distroless/static run images have neither, and the run image is never
+modified. The intended fix runs `tar` from the BUILD image (mounted in) against the
+run-image rootfs (tracked as a required correctness item). Finalize is unaffected by
+this — it authors metadata from whatever diffIDs BuildKit produced.
 
 ### Local validation results (samples/go/no-imports)
 
 Validated end-to-end against a local `registry:2` with the patched builder +
-lifecycle. Build wall-times (Apple silicon, `docker-container` builder; arm64 native,
-amd64 emulated via QEMU):
+lifecycle, covering REPEATED cycles (not just the first):
 
-| Build | Platforms | Wall time |
-|---|---|---|
-| Cold (fresh tag) | linux/arm64 | ~37s |
-| Warm rebuild (same tag) | linux/arm64 | ~6s (≈6× faster; BuildKit cache + analyzer previous-image restore works) |
-| Cold multi-arch | linux/amd64 + linux/arm64 | ~174s (amd64 leg is QEMU-emulated) |
+- COLD build → runnable image; finalize authored the CNB metadata (7 new-layer diffID
+  remaps); the final tag is created directly (no intermediate `-arch` tag).
+- REBUILD ×2 (same tag) → the analyzer's previous-image restore ("Restoring data for
+  SBOM from previous image") SUCCEEDS each time; after each rebuild all per-layer
+  metadata SHAs equal the image's actual diffIDs.
+- REBASE ×2 → `pack rebase` succeeds each time (idempotent).
+- REBUILD after REBASE → succeeds.
+- MULTI-ARCH (linux/amd64 + linux/arm64) → ONE OCI index, both children finalized
+  (each: 11 layers, build-metadata label removed, valid `io.buildpacks.lifecycle.metadata`,
+  correct per-arch `RunImage.TopLayer`), no intermediate tags.
+- Confirmed: after build+finalize, the only host-side registry write is finalize's
+  config+manifest update — no layer blobs are re-uploaded.
 
-What was confirmed:
-- Cold build → runnable image (11 layers = 4 run-image base + 7 CNB; CNB labels
-  present; entrypoint `/cnb/process/workspace`; app binary present).
-- Warm rebuild → succeeds; **no analyzer previous-image restore failure** (the bug
-  the SHA rewrite fixes).
-- All per-layer metadata SHAs match the image's actual layer diffIDs
-  (buildpack-layer patching prerequisite met).
-- Multi-arch → one native OCI image index, both arches well-formed, no `build-*`
-  intermediate tags.
-- `pack rebase` on the built image → succeeds.
-
-> Raw logs and timings are under `/tmp/kiro-command-logs/` on the dev machine
-> (e.g. `mvp-cold-nativeclean1-*.log`, `mvp-warm-nativeclean1-*.log`,
-> `mvp-multiarch1-*.log`, `mvp-rebase-*.log`, `verify-metadata-shas.py` /
-> `verify-multiarch.py` output). These are local artifacts, not committed. A formal
-> cold/warm timing capture and a large Node/Python egress comparison vs the other
-> backends are still pending (see Future Work).
+> Raw logs under `/tmp/kiro-command-logs/` (`optA-*`), summary in
+> `optA-VALIDATION-SUMMARY.md`. Local artifacts, not committed. A large Node/Python
+> egress + cold/warm timing comparison vs the other backends is still pending.
 
 ### Local test-environment prerequisites (buildkit-native)
 
-The native backend runs the lifecycle phases as `RUN`s that must reach the registry
-(to pull the run image and push), and the assembly needs host networking. For local
-validation:
+The build runs the lifecycle phases as `RUN`s that must reach the registry, and the
+assembly needs host networking, for local validation:
 
 - Run a local `registry:2` on the buildx builder's docker network so in-build `RUN`s
-  can reach it by name (e.g. `pack-local-registry:5000`), while the host reaches it
-  via a published port (e.g. `localhost:5050`).
-- Create the builder with `--allow-insecure-entitlement network.host` and a buildkitd
+  reach it by name (e.g. `pack-local-registry:5000`), while the host reaches it via a
+  published port (e.g. `localhost:5050`).
+- Create the builder with `--allow-insecure-entitlement network.host` + a buildkitd
   insecure-registry config for the local registry; the lifecycle phase `RUN`s use
   `llb.Network(NetMode_HOST)` and pack requests the `network.host` entitlement.
 - The host-vs-buildkit registry name difference (BuildKit pushes to
-  `pack-local-registry:5000`; the host-side rewrite must use `localhost:5050`) is
-  bridged by the `PACK_HOST_REGISTRY_REMAP` env var (format `src=dst`). This is a
-  **local test-env artifact only** and is a no-op in production (where both refer to
-  the same registry).
+  `pack-local-registry:5000`; the host-side finalize must use `localhost:5050`) is
+  bridged by `PACK_HOST_REGISTRY_REMAP` (`src=dst`). Local test-env only; no-op in
+  production.
 
 ## Future Work
 
 - **Self-healing buildkit-native builds**: on a build whose target ref already
-  exists remotely, pack inspects the existing image's `io.buildpacks.lifecycle.metadata`
-  for rebuild/rebase validity; if invalid it warns and stops, unless an opt-in flag
-  (e.g. `--buildkit-fix-remote-image-metadata`) is set, in which case pack fixes the
-  image in place (reads only config+manifest, no layer egress) before proceeding.
-  CI/CD can enable the flag by default for hands-off recovery from a failed post-push
-  rewrite — no separate "repair" command needed. Depends on the durable
-  `io.buildpacks.native.layer-order` label. See Caveat 1.
+  exists remotely and is not yet finalized, pack runs FINALIZE on it in place
+  (config+manifest only, no layer egress) when an opt-in flag
+  (e.g. `--buildkit-fix-remote-image-metadata`) is set; otherwise it warns and stops.
+  This recovers from an interrupted build whose finalize did not complete, using the
+  image's retained `io.buildpacks.buildkit.native.build-metadata` label — no separate
+  "repair" command. Requires keeping the build-metadata label durable on the image
+  (finalize's `KeepBuildMetadataLabel` option). See Caveat 1. Not implemented.
 - **Build-image tar for assembly**: run `tar` from the build image (mounted in)
   rather than the run image's shell/tar, so run images with no shell/tar are
-  supported and shared-library loading issues are avoided. See Caveat 4.
-- **Standalone frontend rebuild support (buildkit-native)**: make the standalone
-  `cnb-frontend` image usable for the full rebuild/rebase lifecycle (not just a
-  one-shot build) — either by self-applying the metadata-SHA rewrite or by clearly
-  documenting/detecting the first-build-only limitation. The durable
-  `io.buildpacks.native.layer-order` label also lets an external tool heal a
-  standalone-built image. See Caveat 2.
+  supported and shared-library loading issues are avoided. Required correctness item.
+  See Caveat 3.
+- **Finalize subcommand (standalone)**: wrap the lifecycle `phase/finalize` library
+  in a `lifecycle finalize` subcommand so an operator/CI tool can finalize (or
+  re-finalize) an already-pushed buildkit-native image outside pack. Underpins the
+  self-healing flow above.
+- **Lifecycle image versioning for CI**: tag the fork lifecycle (e.g. `v100.0.1`) and
+  repoint pack's `replace` at the tag for reproducible CI (currently a local-path
+  replace for the MVP iterate loop).
 - **Ephemeral Registry Export Mode**: Spin up a temporary registry on a shared Docker network
   with the buildkit builder, push per-arch images there during the build, then assemble the
   manifest list from the ephemeral registry and push atomically to the final registry. This
@@ -1002,13 +839,18 @@ lifecycle from `jericop/lifecycle:skip-chown-poc`.
 The buildkit-native backend spans two branches (experimental, MVP):
 
 - **jericop/cnb-pack (branch: `buildkit-native-export`)** — the `buildkit-native`
-  backend + the host-side metadata-SHA rewrite
-  (`internal/build/multiplatform/backend_native.go`, `metadata_rewrite.go`,
-  `emit_contract.go`).
+  backend that drives the BuildKit build+push and calls the lifecycle finalize
+  library post-push (`internal/build/multiplatform/backend_native.go`; `executor.go`
+  routes single-arch native builds to the final tag; `metadata_rewrite.go` now holds
+  only the test-env registry-remap shim — the rewrite logic moved to the lifecycle).
 - **jericop/cnb-lifecycle (branch: `buildkit-native-export`)** — the exporter
-  emit-mode (`phase/emit`) and the CNB BuildKit gateway frontend
-  (`buildkit/cnbfrontend`, standalone entrypoint `cmd/cnb-frontend`). Published
-  lifecycle image: `jericop/lifecycle:buildkit-native-export`.
+  emit-mode that computes the ordered plan + build-metadata label (`phase/emit`) and
+  the FINALIZE library that authors CNB metadata from produced diffIDs
+  (`phase/finalize`), consumed by pack like `phase.Rebaser`. Published lifecycle
+  image: `jericop/lifecycle:buildkit-native-export`. (The `buildkit/cnbfrontend`
+  package still assembles the layers `FROM run-image` and attaches the build-metadata
+  label in the current MVP; the earlier per-layer rewrite/layer-order approach is
+  retired.)
 
 Pack consumes the lifecycle as a library via a `replace` directive (local clone for
 the MVP; a tagged `jericop/cnb-lifecycle v100.0.1` for CI reproducibility is planned).
