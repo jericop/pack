@@ -22,42 +22,39 @@ thin caller of the lifecycle finalize library; the frontend is retired.
 
 ## Tasks
 
-- [ ] 1. Build phase: assemble FROM run-image via LLB + push natively (no frontend)
-  - Rework `NativeBackend` so Phase 1 builds the app image via the LLB machinery
-    (reuse/adapt `LLBBackend.buildLLBState`): FROM builder → COPY app → analyzer →
-    detector → restorer → builder → exporter, assembling `FROM run-image`, with the
-    unprivileged-BuildKit flags (`-skip-chown`). NO `tar -xf` re-extraction; the
-    image layers are the exporter's produced layers.
-  - BuildKit pushes ONE native multi-arch image (ExporterImage, push=true) — no
-    intermediate tags. Layer data stays in BuildKit.
+- [x] 1. Build phase: assemble FROM run-image via LLB + push natively (no frontend)
+  - DONE. `NativeBackend` drives an IN-PROCESS gateway BuildFunc (`native_buildfunc.go`)
+    via `bkClient.Build` — NO separate frontend. Per platform: builder base → COPY
+    app → analyzer/detector/restorer/builder/exporter(emit-mode) → assemble
+    `FROM run-image` via per-layer `llb.Copy` from the emitted layer SOURCES. NO
+    `tar -xf`, no re-extraction. BuildKit pushes ONE native image/index, no
+    intermediate tags.
   - _Requirements: 1, 2, 5, 6_
 
-- [ ] 2. Attach the build-metadata label during the build
-  - Ensure the built image carries `io.buildpacks.buildkit.native.build-metadata`
-    (the lifecycle emit-mode plan, serialized). Decide + document HOW it is attached
-    (options in design): (a) the lifecycle exporter writes it directly in the build,
-    or (b) pack obtains the emitted plan and sets the label via the image config
-    result. Prefer (a) so the lifecycle owns it end to end.
-  - The build phase MUST NOT pre-write a valid final `io.buildpacks.lifecycle.metadata`.
+- [x] 2. Attach the build-metadata label during the build
+  - DONE. The BuildFunc sets `io.buildpacks.buildkit.native.build-metadata` (the
+    serialized plan + emitted labels, read from `/emit/buildkit/build-metadata.json`)
+    on the image config via the gateway result (`ExporterImageConfigKey`). It sets
+    only the runtime config (entrypoint/cmd/workingdir/env) — NOT a valid final
+    `io.buildpacks.lifecycle.metadata`.
   - _Requirements: 3_
 
-- [ ] 3. Call the lifecycle FINALIZE library post-push
-  - After the push, `NativeBackend` calls the lifecycle finalize library
-    (imported like `phase.Rebaser`) on the pushed image ref. Finalize authors
-    `io.buildpacks.lifecycle.metadata` from produced diffIDs + the build-metadata
-    label and re-pushes config+manifest(+index) only.
-  - Replace `metadata_rewrite.go` with a thin caller of finalize, or remove it once
-    `NativeBackend` calls finalize directly. Retain the `PACK_HOST_REGISTRY_REMAP`
-    test-env shim where finalize needs a host-reachable ref locally.
+- [x] 3. Call the lifecycle FINALIZE library post-push
+  - DONE. `NativeBackend.driveNative` calls `finalize.Finalize` (imported like
+    `phase.Rebaser`) on the pushed ref; it authors `io.buildpacks.lifecycle.metadata`
+    from produced diffIDs + the build-metadata label and re-pushes config+manifest
+    (+index) only. `metadata_rewrite.go` slimmed to the `PACK_HOST_REGISTRY_REMAP`
+    test-env shim.
   - _Requirements: 4_
 
-- [ ] 4. Retire the frontend from the pack path
-  - Remove pack's dependence on `cnbfrontend` (in-process `client.Build` driving).
-    Pack no longer imports the frontend for assembly. (The lifecycle may keep the
-    frontend package around as history, but pack does not use it.)
+- [x] 4. Retire the frontend from the pack path
+  - DONE. Pack no longer imports `cnbfrontend`; the lifecycle `buildkit/cnbfrontend`
+    package + `cmd/cnb-frontend` are DELETED. Assembly is expressed with `llb.Copy`
+    directly from pack's in-process BuildFunc. Pack's dead `emit_contract.go` (the
+    old file-based parser) was removed.
   - _Requirements: 2_
 
-- [ ] 5. Local validation — REPEATED rebuilds + rebases (MVP acceptance bar)
+- [x] 5. Local validation — REPEATED rebuilds + rebases (MVP acceptance bar)
   - Build `samples/go/no-imports` to the local registry; runnable check (real
     layers, correct `io.buildpacks.lifecycle.metadata` after finalize, launch binary
     present). Then verify REPEATED cycles:

@@ -6,24 +6,15 @@ import (
 	"strings"
 
 	"github.com/moby/buildkit/client"
-	"github.com/moby/buildkit/client/llb"
 	"github.com/moby/buildkit/session"
 	"github.com/moby/buildkit/util/entitlements"
+	ocispecs "github.com/opencontainers/image-spec/specs-go/v1"
 	"github.com/tonistiigi/fsutil"
 
-	"github.com/buildpacks/lifecycle/buildkit/cnbfrontend"
-	"github.com/buildpacks/lifecycle/phase/emit"
 	"github.com/buildpacks/lifecycle/phase/finalize"
 
 	"github.com/buildpacks/pack/pkg/logging"
 )
-
-// emitOutputDir is the directory inside the BuildKit build where the lifecycle's
-// emit-mode writes the emit contract. The BuildKit-native recorder writes its
-// files under <emitOutputDir>/<emit.RecorderDir>/ (i.e. /emit/buildkit/plan.json
-// and config.json). This path is passed to the exporter's -emit-export-plan flag
-// and is where pack reads the contract back from.
-const emitOutputDir = "/emit"
 
 // NativeBackend implements BuildBackend for the EXPERIMENTAL "buildkit-native"
 // approach (Option C: buildkit-native-export). It runs the lifecycle
@@ -78,175 +69,7 @@ func (b *NativeBackend) Capabilities() BackendCapabilities {
 	}
 }
 
-// buildEmitGraph constructs the LLB state that runs the lifecycle through the
-// builder phase and then runs the exporter in EMIT-MODE, producing the emit
-// contract under emitOutputDir. The returned state's /emit/buildkit/ holds
-// plan.json + config.json; /layers holds the built layer tars the plan
-// references. Assembly (a later step) consumes both.
-//
-// This mirrors LLBBackend.buildLLBState through the builder phase, then diverges:
-// instead of the exporter writing/pushing an image (or an OCI layout), it runs
-// with -emit-export-plan so nothing is pushed and the contract is emitted.
-func (b *NativeBackend) buildEmitGraph(opts PlatformBuildOpts, platform Platform, perArchTag string) llb.State {
-	// Start from the builder image.
-	base := llb.Image(opts.BuilderImage)
-
-	// Optionally replace the lifecycle binaries from a lifecycle image (needed so
-	// the builder bundles the emit-capable lifecycle).
-	if opts.LifecycleImage != "" && !strings.HasPrefix(opts.LifecycleImage, "pack.local/") {
-		lifecycleImg := llb.Image(opts.LifecycleImage)
-		base = base.Run(
-			llb.Args([]string{"/bin/sh", "-c", "rm -rf /cnb/lifecycle"}),
-			llb.WithCustomName("remove existing lifecycle"),
-		).Root()
-		base = base.File(
-			llb.Copy(lifecycleImg, "/cnb/lifecycle", "/cnb/lifecycle", &llb.CopyInfo{
-				CreateDestPath: true,
-			}),
-			llb.WithCustomName("copy lifecycle from "+opts.LifecycleImage),
-		)
-	}
-
-	// Setup dirs (world-writable; chown may not work in unprivileged buildkit).
-	// Includes the /emit output dir for the emit contract.
-	base = base.Run(
-		llb.Args([]string{"/bin/sh", "-c", "mkdir -p /cache /layers /platform " + emitOutputDir + " && chmod -R 777 /cache /layers " + emitOutputDir}),
-		llb.WithCustomName("setup directories"),
-	).Root()
-
-	// Custom order.toml if provided.
-	if opts.OrderToml != "" {
-		orderCmd := fmt.Sprintf("cat > /cnb/order.toml << 'TOML'\n%s\nTOML", opts.OrderToml)
-		base = base.Run(
-			llb.Args([]string{"/bin/bash", "-c", orderCmd}),
-			llb.WithCustomName("write order.toml"),
-			llb.User("0:0"),
-		).Root()
-	}
-
-	// Copy app source and make it writable by the CNB user.
-	appSource := llb.Local("context")
-	base = base.File(
-		llb.Copy(appSource, "/", "/workspace", &llb.CopyInfo{
-			CreateDestPath:     true,
-			AllowWildcard:      true,
-			AllowEmptyWildcard: true,
-		}),
-		llb.WithCustomName("copy app source"),
-	)
-	base = base.Run(
-		llb.Args([]string{"/bin/sh", "-c", "chmod -R 777 /workspace"}),
-		llb.WithCustomName("fix workspace permissions"),
-	).Root()
-
-	// Persistent buildpack cache mount.
-	cacheID := fmt.Sprintf("%s-%s", opts.CacheID, platform.Arch)
-	cacheMountOpt := llb.AddMount("/cache",
-		llb.Scratch(),
-		llb.AsPersistentCacheDir(cacheID, llb.CacheMountShared),
-	)
-
-	// Env + user for lifecycle phases (run as the CNB user).
-	cnbUser := fmt.Sprintf("%d:%d", opts.BuilderUID, opts.BuilderGID)
-	envOpts := []llb.RunOption{
-		llb.AddEnv("CNB_PLATFORM_API", opts.PlatformAPI),
-		llb.AddEnv("CNB_USER_ID", fmt.Sprintf("%d", opts.BuilderUID)),
-		llb.AddEnv("CNB_GROUP_ID", fmt.Sprintf("%d", opts.BuilderGID)),
-		llb.User(cnbUser),
-	}
-	if opts.RegistryAuth != "" {
-		envOpts = append(envOpts, llb.AddEnv("CNB_REGISTRY_AUTH", opts.RegistryAuth))
-	}
-
-	// Ensure the cache mount is writable by the CNB user.
-	base = base.Run(
-		llb.Args([]string{"/bin/sh", "-c", "chmod 777 /cache"}),
-		llb.WithCustomName("fix cache mount permissions"),
-		cacheMountOpt,
-		llb.IgnoreCache,
-	).Root()
-
-	// Phase: Analyzer. In emit-mode the analyzer does NOT need -layout /
-	// -pull-run-image: the run image is a native base in the assembly step, and
-	// the exporter reads it there. The analyzer still resolves the run image into
-	// analyzed.toml (which the emit exporter uses for the rebase boundary).
-	base = base.Run(
-		append([]llb.RunOption{
-			llb.Args(b.emitPhaseArgs(opts, "analyzer", perArchTag)),
-			llb.WithCustomName("lifecycle: analyzer"),
-			cacheMountOpt,
-		}, envOpts...)...,
-	).Root()
-
-	// Phase: Detector.
-	base = base.Run(
-		append([]llb.RunOption{
-			llb.Args(buildPhaseArgs(opts, "detector", perArchTag)),
-			llb.WithCustomName("lifecycle: detector"),
-		}, envOpts...)...,
-	).Root()
-
-	// Phase: Restorer.
-	base = base.Run(
-		append([]llb.RunOption{
-			llb.Args(b.emitPhaseArgs(opts, "restorer", perArchTag)),
-			llb.WithCustomName("lifecycle: restorer"),
-			cacheMountOpt,
-		}, envOpts...)...,
-	).Root()
-
-	// Phase: Builder.
-	base = base.Run(
-		append([]llb.RunOption{
-			llb.Args(buildPhaseArgs(opts, "builder", perArchTag)),
-			llb.WithCustomName("lifecycle: builder"),
-		}, envOpts...)...,
-	).Root()
-
-	// Phase: Exporter in EMIT-MODE. Instead of assembling/pushing an image, the
-	// exporter records its operations and writes the emit contract to
-	// <emitOutputDir>/buildkit/{plan.json,config.json}. Nothing is pushed.
-	base = base.Run(
-		append([]llb.RunOption{
-			llb.Args(b.emitPhaseArgs(opts, "exporter", perArchTag)),
-			llb.WithCustomName("lifecycle: exporter (emit-mode)"),
-			cacheMountOpt,
-		}, envOpts...)...,
-	).Root()
-
-	return base
-}
-
-// emitPhaseArgs builds the lifecycle phase args for emit-mode. It starts from the
-// base per-arch args, adds the unprivileged-BuildKit flags (-skip-chown/-uid/-gid)
-// for the phases that touch layers/cache, and for the exporter adds
-// -emit-export-plan=<emitOutputDir> so it runs in emit-mode (no push, no image
-// assembly).
-func (b *NativeBackend) emitPhaseArgs(opts PlatformBuildOpts, phaseName string, perArchTag string) []string {
-	args := buildPhaseArgs(opts, phaseName, perArchTag)
-	if len(args) == 0 {
-		return args
-	}
-
-	switch phaseName {
-	case "analyzer", "restorer", "exporter":
-		args = insertAfterBinary(args,
-			"-skip-chown",
-			"-uid", fmt.Sprintf("%d", opts.BuilderUID),
-			"-gid", fmt.Sprintf("%d", opts.BuilderGID),
-		)
-	}
-
-	if phaseName == "exporter" {
-		// Opt into emit-mode: record the plan + config to emitOutputDir instead of
-		// assembling/pushing an image.
-		args = insertAfterBinary(args, "-emit-export-plan", emitOutputDir)
-	}
-
-	return args
-}
-
-// Build executes the emit graph + native assembly for a single platform.
+// Build executes the buildkit-native build for a single platform.
 func (b *NativeBackend) Build(ctx context.Context, opts PlatformBuildOpts) (PlatformBuildResult, error) {
 	results, err := b.BuildMultiPlatform(ctx, []Platform{opts.Platform}, opts)
 	if err != nil {
@@ -275,24 +98,25 @@ func (b *NativeBackend) BuildMultiPlatform(ctx context.Context, platforms []Plat
 	}
 	defer bkClient.Close()
 
-	return b.driveFrontend(ctx, bkClient, platforms, opts)
+	return b.driveNative(ctx, bkClient, platforms, opts)
 }
 
-// driveFrontend runs the CNB BuildKit gateway frontend (cnbfrontend.Build)
-// IN-PROCESS via bkClient.Build. The frontend runs the lifecycle phases +
-// emit-mode, assembles the final image(s) FROM the run image inside BuildKit, and
-// returns per-platform refs + image config. BuildKit then exports the
-// (multi-platform) image via ExporterImage — assembling one manifest list
-// natively with no intermediate tags and no host layer-data egress.
+// driveNative drives pack's IN-PROCESS gateway BuildFunc (nativeBuildFunc) via
+// bkClient.Build. The BuildFunc runs the lifecycle phases + exporter emit-mode,
+// assembles the final image(s) FROM the run image via llb.Copy from the emitted
+// layer sources, and returns per-platform refs + image config (incl. the
+// build-metadata label). BuildKit then exports the (multi-platform) image via
+// ExporterImage — ONE image/index, no intermediate tags, no host layer-data
+// egress. NativeBackend then calls the lifecycle finalize library to author the
+// final CNB metadata. No separate frontend package/image is involved.
 //
-// The frontend handles ALL platforms in a single Build (it builds each platform
-// and returns per-platform refs), so there is one bkClient.Build call regardless
-// of platform count.
-func (b *NativeBackend) driveFrontend(ctx context.Context, bkClient *client.Client, platforms []Platform, opts PlatformBuildOpts) ([]PlatformBuildResult, error) {
+// A single bkClient.Build handles ALL platforms (the BuildFunc builds each and
+// returns per-platform refs).
+func (b *NativeBackend) driveNative(ctx context.Context, bkClient *client.Client, platforms []Platform, opts PlatformBuildOpts) ([]PlatformBuildResult, error) {
 	if !opts.Publish {
-		// MVP: the frontend path assembles + exports via BuildKit's image
-		// exporter with push=true. Non-publish (local daemon/OCI) output is a
-		// future addition; fail loudly rather than silently no-op.
+		// MVP: the native path exports via BuildKit's image exporter with
+		// push=true. Non-publish (local daemon/OCI) output is a future addition;
+		// fail loudly rather than silently no-op.
 		return nil, fmt.Errorf("buildkit-native backend currently requires --publish (registry export)")
 	}
 
@@ -304,47 +128,43 @@ func (b *NativeBackend) driveFrontend(ctx context.Context, bkClient *client.Clie
 
 	authProvider := newDockerAuthProvider()
 
-	// Frontend options: the cnb-* keys the frontend reads via BuildOpts().Opts.
-	frontendAttrs := map[string]string{
-		cnbfrontend.OptBuilderImage: opts.BuilderImage,
-		cnbfrontend.OptRunImage:     opts.RunImage,
-		cnbfrontend.OptImageName:    opts.ImageName,
-		cnbfrontend.OptPlatforms:    platformsCSV(platforms),
-		cnbfrontend.OptPlatformAPI:  opts.PlatformAPI,
-		cnbfrontend.OptUID:          fmt.Sprintf("%d", opts.BuilderUID),
-		cnbfrontend.OptGID:          fmt.Sprintf("%d", opts.BuilderGID),
+	// Build the in-process BuildFunc inputs. There is NO separate frontend
+	// package/image: pack drives the gateway API directly with its own BuildFunc
+	// (nativeBuildFunc), which assembles FROM run-image via llb.Copy from the
+	// emitted layer sources and sets the image config + build-metadata label.
+	in := nativeBuildInputs{
+		builderImage: opts.BuilderImage,
+		runImage:     opts.RunImage,
+		imageName:    opts.ImageName,
+		platforms:    ocispecsPlatforms(platforms),
+		platformAPI:  opts.PlatformAPI,
+		uid:          opts.BuilderUID,
+		gid:          opts.BuilderGID,
+		orderTOML:    opts.OrderToml,
+		registryAuth: opts.RegistryAuth,
 	}
-	// Any insecure (plain-HTTP) registry the in-build lifecycle phases must reach
-	// (e.g. a local dev registry). Derived from the target image's registry host.
 	if reg := registryHost(opts.ImageName); reg != "" && isLikelyInsecureRegistry(reg) {
-		frontendAttrs[cnbfrontend.OptInsecureReg] = reg
+		in.insecureRegistries = []string{reg}
 	}
 	if opts.LifecycleImage != "" && !strings.HasPrefix(opts.LifecycleImage, "pack.local/") {
-		frontendAttrs[cnbfrontend.OptLifecycleImage] = opts.LifecycleImage
-	}
-	if opts.OrderToml != "" {
-		frontendAttrs[cnbfrontend.OptOrderTOML] = opts.OrderToml
-	}
-	if opts.RegistryAuth != "" {
-		frontendAttrs[cnbfrontend.OptRegistryAuth] = opts.RegistryAuth
+		in.lifecycleImage = opts.LifecycleImage
 	}
 
 	solveOpt := client.SolveOpt{
 		LocalMounts: map[string]fsutil.FS{
-			cnbfrontend.ContextLocalName: appFS,
+			contextLocalName: appFS,
 		},
-		Session:       []session.Attachable{authProvider},
-		CacheImports:  b.llb.parseCacheImports(),
-		CacheExports:  b.llb.parseCacheExports(),
-		FrontendAttrs: frontendAttrs,
-		// Request the network.host entitlement so the frontend's lifecycle phase
-		// RUNs (which run on the builder's host network to reach registries the
-		// builder is attached to) are permitted. The builder must also be started
-		// with --allow-insecure-entitlement network.host. (MVP; revisit for
-		// production network isolation.)
+		Session:      []session.Attachable{authProvider},
+		CacheImports: b.llb.parseCacheImports(),
+		CacheExports: b.llb.parseCacheExports(),
+		// Request the network.host entitlement so the lifecycle phase RUNs (which
+		// run on the builder's host network to reach registries the builder is
+		// attached to) are permitted. The builder must also be started with
+		// --allow-insecure-entitlement network.host. (MVP; revisit for production
+		// network isolation.)
 		AllowedEntitlements: []string{string(entitlements.EntitlementNetworkHost)},
 		// BuildKit assembles + pushes the (multi-platform) image natively under
-		// the final name — one manifest list, no intermediate tags.
+		// the final name — one image/index, no intermediate tags.
 		Exports: []client.ExportEntry{{
 			Type:  client.ExporterImage,
 			Attrs: exporterImageAttrs(opts.ImageName),
@@ -352,11 +172,11 @@ func (b *NativeBackend) driveFrontend(ctx context.Context, bkClient *client.Clie
 	}
 
 	ch := b.llb.startProgressDisplay("[buildkit-native]")
-	b.logger.Infof("Building %s via buildkit-native frontend (%d platform(s))", opts.ImageName, len(platforms))
+	b.logger.Infof("Building %s via buildkit-native (%d platform(s))", opts.ImageName, len(platforms))
 
-	// product="" -> default. cnbfrontend.Build is the in-process gateway BuildFunc.
-	if _, err := bkClient.Build(ctx, solveOpt, "", cnbfrontend.Build, ch); err != nil {
-		return nil, fmt.Errorf("buildkit-native frontend build: %w", err)
+	// product="" -> default. nativeBuildFunc is pack's in-process gateway BuildFunc.
+	if _, err := bkClient.Build(ctx, solveOpt, "", makeNativeBuildFunc(in), ch); err != nil {
+		return nil, fmt.Errorf("buildkit-native build: %w", err)
 	}
 
 	// Post-push FINALIZE (Option A): author the correct io.buildpacks.lifecycle.metadata
@@ -402,14 +222,13 @@ func exporterImageAttrs(imageName string) map[string]string {
 	return attrs
 }
 
-// platformsCSV renders the platforms as a comma-separated os/arch list for the
-// frontend's cnb-platforms option.
-func platformsCSV(platforms []Platform) string {
-	parts := make([]string, len(platforms))
+// ocispecsPlatforms converts pack Platforms to ocispecs.Platform for the BuildFunc.
+func ocispecsPlatforms(platforms []Platform) []ocispecs.Platform {
+	out := make([]ocispecs.Platform, len(platforms))
 	for i, p := range platforms {
-		parts[i] = p.String()
+		out[i] = ocispecs.Platform{OS: p.OS, Architecture: p.Arch, Variant: p.Variant}
 	}
-	return strings.Join(parts, ",")
+	return out
 }
 
 // registryHost extracts the registry host (with port) from an image reference,
@@ -448,6 +267,4 @@ func isLikelyInsecureRegistry(host string) bool {
 	return !strings.Contains(h, ".")
 }
 
-// schema is a compile-time reference to the imported emit contract version, so
-// the native backend and the lifecycle stay pinned to the same schema.
-var _ = emit.Schema
+

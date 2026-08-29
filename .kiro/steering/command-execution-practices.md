@@ -30,16 +30,40 @@ bash /tmp/build.sh
 `bash /tmp/<name>.sh` stays a stable, already-approved command, so iteration is not
 interrupted by re-approval of a slightly different inline command each time.
 
-## 2. Use a temporary script for long or complex commands
+## 2. ALWAYS use a script for long/complex/piped commands (MANDATORY)
 
-If a command is long, has multiple pipes/subshells, heredocs, or multi-step logic,
-write it to a temporary shell or Python script (e.g. under `/tmp/`) and execute the
-script. Inline megacommands are hard to read, easy to get subtly wrong, and more
-likely to hang the terminal. A script is easier to review, re-run, and tweak.
+This is a HARD RULE, not a suggestion. If a command has ANY of the following, it
+MUST be written to a temporary shell/Python script under `/tmp/` and invoked as
+`bash /tmp/<name>.sh` (optionally with arguments):
 
-- Shell or Python is fine — use whichever fits the task.
-- Keep the log-to-file convention (tee to `/tmp/kiro-command-logs/...`) inside the
-  script or when invoking it.
+- one or more PIPES (`|`), including `... 2>&1 | tee ...` / `| grep` / `| head`,
+- subshells or command substitution (`$(...)`, backticks),
+- heredocs (`<<'EOF'`),
+- inline environment variables (`VAR=... cmd`),
+- multiple statements (`;`, `&&`, `||`),
+- more than a trivial single command with a couple of flags.
+
+WHY (two reasons, both painful):
+
+1. **Re-approval prompts.** Approvals are keyed on the EXACT command string. Every
+   time the inline command text changes even slightly (a different grep pattern, a
+   different path, a changed heredoc), it registers as a NEW command and prompts for
+   approval again. A stable `bash /tmp/<name>.sh` invocation stays approved across
+   iterations — EDIT THE SCRIPT, do not change the invocation.
+2. **Terminal hangs.** Complex inline quoting/pipes are the main cause of the
+   terminal hanging (see #3).
+
+RULES:
+
+- Put the varying parts (patterns, paths, tags) INSIDE the script or pass them as
+  POSITIONAL ARGS, so the invocation `bash /tmp/<name>.sh <args>` stays stable.
+- Prefer a few REUSABLE scripts (e.g. `/tmp/bk-inspect.sh`, `/tmp/optA-build.sh`)
+  over a fresh inline command each time.
+- Shell or Python is fine — use whichever fits.
+- Keep the log-to-file convention (tee to `/tmp/kiro-command-logs/...`) INSIDE the
+  script.
+- Only bare, unchanging single commands (e.g. `docker buildx ls`,
+  `git status`) are OK to run inline. When in doubt, use a script.
 
 ## 3. Beware improperly terminated / mis-quoted strings (they hang the shell)
 

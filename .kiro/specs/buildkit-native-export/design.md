@@ -61,24 +61,32 @@ pack build --build-backend buildkit-native --platforms ... --publish
 
 ## Components and Interfaces
 
-### `NativeBackend` (pack, `internal/build/multiplatform/backend_native.go`)
+### `NativeBackend` + in-process BuildFunc (pack, `internal/build/multiplatform/`)
 
-- Drives the BuildKit build+push (Phase 1) and then calls the lifecycle finalize
-  library (Phase 2).
-- `Capabilities().PushesNatively = true` (the executor does not run its own
-  assembly/push).
-- Phase 1 assembly reuses the LLB machinery already proven in `LLBBackend`
-  (`FROM run-image` assembly in LLB was done in an earlier iteration without issue).
-  The build must:
-  - run the lifecycle phases as LLB RUNs (analyzer/detector/restorer/builder/
-    exporter), with the same unprivileged-BuildKit flags the LLB backend uses
-    (`-skip-chown` etc.),
-  - produce an image whose layers ARE the exporter's produced layers (no
-    `tar -xf` re-extraction),
-  - attach the `io.buildpacks.buildkit.native.build-metadata` label (the serialized
-    ordered plan the lifecycle emit-mode produced),
-  - let BuildKit push ONE manifest list (ExporterImage, push=true) with no
-    intermediate tags.
+NO separate gateway frontend (`cnbfrontend` package + `cmd/cnb-frontend` are
+RETIRED). Pack drives the build via `client.Build` with an IN-PROCESS BuildFunc it
+owns. (Setting the output image config/labels requires the gateway result API —
+`client.Solve` alone cannot, verified in moby/buildkit v0.32.2 — but this is pack's
+own build function, not a separately-deployed frontend component.) The BuildFunc,
+per platform:
+
+- runs the lifecycle phases as LLB RUNs (analyzer/detector/restorer/builder/exporter
+  in emit-mode) with the unprivileged-BuildKit flags (`-skip-chown` etc.),
+- reads the emit output — the ordered plan whose NEW layers carry SOURCE REFS
+  (`source.dir` + optional `include`/`dest`/uid/gid) — plus build-metadata.json,
+- assembles `FROM run-image` by, per NEW layer, `llb.Copy` from the emitted
+  `source.dir` (applying `include`/`dest` and chown to the emitted uid:gid) onto the
+  base. ONE `llb.Copy` per CNB layer (boundaries preserved). NO `tar -xf`, NO
+  run-image shell/tar, NO materialization of large layers. Synthesized layers with
+  no filesystem source (e.g. process-types) are copied from a tiny emitted tree.
+- sets the image config (entrypoint/cmd/workingdir/env) + the
+  `io.buildpacks.buildkit.native.build-metadata` label via the gateway result
+  (`ExporterImageConfigKey`); does NOT write a valid final
+  `io.buildpacks.lifecycle.metadata`,
+- returns per-platform refs so BuildKit pushes ONE image (multi-arch = one index),
+  no intermediate tags.
+
+`NativeBackend` then calls `finalize.Finalize` (Phase 2). `Capabilities().PushesNatively = true`.
 
 ### Build-metadata label (contract with the lifecycle)
 

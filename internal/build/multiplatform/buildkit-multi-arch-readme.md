@@ -710,15 +710,17 @@ SHA equal the ACTUAL produced diffID, so buildpack-layer patching works too. Use
 LLB `oci-layout` mode if you require byte-for-byte diffID parity with the other
 backends.
 
-### CAVEAT 3 — run image is never assumed to have a shell or tar (MVP note)
+### CAVEAT 3 — assembly is BuildKit-native `llb.Copy` (no run-image shell/tar)
 
-The current MVP still assembles by extracting each emitted layer tar onto the
-run-image base via the run image's shell (`tar -xf`), which assumes the run image has
-`/bin/sh` + `tar` (true for ubuntu-noble). This is a KNOWN MVP limitation, not the
-target: distroless/static run images have neither, and the run image is never
-modified. The intended fix runs `tar` from the BUILD image (mounted in) against the
-run-image rootfs (tracked as a required correctness item). Finalize is unaffected by
-this — it authors metadata from whatever diffIDs BuildKit produced.
+The build assembles `FROM run-image` by, per CNB layer, `llb.Copy`-ing the layer's
+files from the emitted filesystem SOURCE (buildpack layers from `/layers/<bp>/<layer>`,
+app from `/workspace`, launcher file) with chown to the CNB uid:gid — a native
+BuildKit FileOp. It does NOT run `tar`/shell on the run image, so distroless/static
+run images work; the run image is never modified. The large layers are NOT
+re-materialized — they are copied by reference from their existing built-state paths;
+only the tiny synthesized process-types layer is extracted (in Go, in emit-mode) into
+a small tree that is copied. Per-layer `llb.Copy` also gives per-layer cache reuse on
+rebuild (an unchanged buildpack layer's copy is a cache hit).
 
 ### Local validation results (samples/go/no-imports)
 
