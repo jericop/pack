@@ -358,6 +358,19 @@ func (b *NativeBackend) driveFrontend(ctx context.Context, bkClient *client.Clie
 		return nil, fmt.Errorf("buildkit-native frontend build: %w", err)
 	}
 
+	// Post-push: rewrite the io.buildpacks.lifecycle.metadata per-layer SHAs to the
+	// image's ACTUAL (BuildKit-recomputed) diffIDs, so the metadata is consistent
+	// with the image (needed for the analyzer's previous-image restore on rebuilds
+	// and for buildpack-layer patching). This mutates only the config+manifest
+	// (layer blobs are unchanged -> no re-upload, no layer-data egress).
+	insecure := false
+	if reg := registryHost(opts.ImageName); reg != "" && isLikelyInsecureRegistry(reg) {
+		insecure = true
+	}
+	if err := rewriteMetadataSHAs(ctx, opts.ImageName, insecure, b.logger); err != nil {
+		return nil, fmt.Errorf("rewriting lifecycle metadata SHAs: %w", err)
+	}
+
 	// One result per platform; all point at the pushed manifest-list name.
 	results := make([]PlatformBuildResult, len(platforms))
 	for i, p := range platforms {
