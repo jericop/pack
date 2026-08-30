@@ -171,6 +171,19 @@ Finalize reads the pushed image (config + manifest, or index → children), read
 boundary), and re-pushes config+manifest(+index) only. Handles single image and
 manifest list. Idempotent and tag-atomic.
 
+**Authenticated fetch (Requirement 4.5).** The finalize fetch immediately follows
+the build's push to the SAME registry, so it must use the build's credentials, not
+anonymous access. Pack threads its resolved keychain
+(`Client.keychain` → `PlatformBuildOpts.Keychain` → `finalize.Options.Keychain`);
+`finalize.Options.Keychain` defaults to `authn.DefaultKeychain` when nil. This was
+added after observing that an anonymous finalize fetch failed builds under registry
+load with Docker Hub `TOOMANYREQUESTS` (the build pushed successfully, then finalize
+could not pull the config/manifest back to author metadata). Authenticating the
+fetch uses the higher per-account rate limit. (Separately, the builder/run-image
+pulls happen inside BuildKit via the session Docker auth provider — see
+`newDockerAuthProvider`; heavy concurrent CI benchmarking can still exhaust registry
+quotas and is mitigated at the workflow level, not in the backend.)
+
 ### `metadata_rewrite.go` (pack) — becomes a thin caller or is removed
 
 The host-side rewrite logic moves into the lifecycle finalize library. Pack's

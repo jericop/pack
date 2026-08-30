@@ -189,6 +189,15 @@ authorship is not duplicated in pack.
    analyzer's previous-image restore succeeds) and rebaseable (Rebaser succeeds),
    and it SHALL support buildpack-contributed-layer patching (metadata SHAs match
    actual layer diffIDs).
+5. FINALIZE SHALL fetch the pushed image config/manifest using PACK'S RESOLVED
+   REGISTRY AUTH (the same keychain pack uses for other registry operations), NOT
+   anonymous access. Pack SHALL pass its keychain to the finalize library
+   (`finalize.Options.Keychain`); WHEN no keychain is provided the library falls
+   back to the default keychain. Rationale: the finalize fetch immediately follows
+   the build's push to the SAME registry; performing it anonymously subjects an
+   otherwise-authenticated build to anonymous pull rate limits (e.g. Docker Hub
+   `TOOMANYREQUESTS`), which was observed to fail builds at the finalize step under
+   registry load.
 
 ### Requirement 5: Multi-arch, no intermediate tags (native BuildKit push)
 
