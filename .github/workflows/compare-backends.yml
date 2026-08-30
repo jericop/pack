@@ -152,7 +152,7 @@ jobs:
         run: |
           s=$(date +%s.%N)
           "${GITHUB_WORKSPACE}/pack-bin" build "$IMG" \
-            --path "samples/${{ matrix.app }}" \
+            --path "${GITHUB_WORKSPACE}/samples/${{ matrix.app }}" \
             --builder "$BUILDER" --run-image "$RUN_IMAGE" \
             --platform "$PLATFORM" --trust-builder
           e=$(date +%s.%N)
@@ -165,7 +165,7 @@ jobs:
         run: |
           s=$(date +%s.%N)
           "${GITHUB_WORKSPACE}/pack-bin" build "$IMG" \
-            --path "samples/${{ matrix.app }}" \
+            --path "${GITHUB_WORKSPACE}/samples/${{ matrix.app }}" \
             --builder "$BUILDER" --run-image "$RUN_IMAGE" \
             --platform "$PLATFORM" --trust-builder
           e=$(date +%s.%N)
@@ -178,7 +178,7 @@ jobs:
         run: |
           s=$(date +%s.%N)
           "${GITHUB_WORKSPACE}/pack-bin" build "$IMG" \
-            --path "samples/${{ matrix.app }}" \
+            --path "${GITHUB_WORKSPACE}/samples/${{ matrix.app }}" \
             --builder "$BUILDER" --run-image "$RUN_IMAGE" \
             --platform "$PLATFORM" --build-backend buildkit \
             --buildkit-builder pack-multiplatform --publish --trust-builder
@@ -192,7 +192,7 @@ jobs:
         run: |
           s=$(date +%s.%N)
           "${GITHUB_WORKSPACE}/pack-bin" build "$IMG" \
-            --path "samples/${{ matrix.app }}" \
+            --path "${GITHUB_WORKSPACE}/samples/${{ matrix.app }}" \
             --builder "$BUILDER" --run-image "$RUN_IMAGE" \
             --platform "$PLATFORM" --build-backend buildkit \
             --buildkit-builder pack-multiplatform --publish --trust-builder
