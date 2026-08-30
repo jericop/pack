@@ -22,10 +22,11 @@ name: benchmark (dockerfile vs buildpacks)
 # gate. It does NOT replace benchmark-perf.yml — that workflow is the primary
 # per-push perf benchmark and is left untouched.
 #
-# NOTE: python/poetry is intentionally omitted for now (its multi-arch cold build is
-# ~40 min under QEMU); the app entry + Dockerfiles exist and can be re-added once an
-# initial run with the faster languages is confirmed. java/java-node is out of scope
-# for this comparison.
+# NOTE: python/poetry's multi-arch cold build is slow under QEMU (its native-dep
+# work runs emulated), so that cell takes considerably longer than the others — but
+# it is an interesting comparison because both the buildpacks and the Dockerfiles
+# pay the same underlying CPython/wheel cost. java/java-node is out of scope for this
+# comparison.
 
 on:
   workflow_dispatch:
@@ -62,11 +63,10 @@ jobs:
       fail-fast: false
       matrix:
         app:
-          - { name: go/mod,     id: go-mod }
-          - { name: nodejs/npm, id: nodejs-npm }
-          - { name: java/maven, id: java-maven }
-          # python/poetry omitted for now (see header note); re-add when ready:
-          # - { name: python/poetry, id: python-poetry }
+          - { name: go/mod,        id: go-mod }
+          - { name: nodejs/npm,    id: nodejs-npm }
+          - { name: java/maven,    id: java-maven }
+          - { name: python/poetry, id: python-poetry }
         build_type: [buildpacks-multi, cnb-like-dockerfile-multi, generic-dockerfile-multi]
     runs-on: ubuntu-latest
     steps:
