@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path"
+	"sort"
 	"strings"
 
 	"github.com/BurntSushi/toml"
@@ -55,6 +56,24 @@ type nativeBuildInputs struct {
 	stackID             string
 	targetDistroName    string
 	targetDistroVersion string
+	// buildEnv is the user-supplied build-time env (pack --env / --env-file +
+	// project.toml [[build.env]]). Written as files under /platform/env/<NAME> — the
+	// CNB platform contract the lifecycle reads to expose them to buildpacks (this is
+	// how BP_* configuration reaches buildpacks). Standard pack writes these into the
+	// builder's env layer; the buildkit path must do the same.
+	buildEnv map[string]string
+	// experimentalMode, when non-empty, is passed as CNB_EXPERIMENTAL_MODE (needed
+	// for extensions and some lifecycle features), matching standard pack.
+	experimentalMode string
+	// sourceDateEpoch, when non-empty, is passed as SOURCE_DATE_EPOCH for reproducible
+	// image timestamps, matching standard pack's --creation-time handling.
+	sourceDateEpoch string
+	// httpProxy/httpsProxy/noProxy are propagated (both UPPER and lower case) to the
+	// lifecycle phases so buildpacks that fetch dependencies work behind a proxy,
+	// matching standard pack's WithLifecycleProxy.
+	httpProxy  string
+	httpsProxy string
+	noProxy    string
 }
 
 // contextLocalName is the llb.Local key under which pack provides the app source.
@@ -404,6 +423,26 @@ func buildEmitLLB(in nativeBuildInputs, p ocispecs.Platform) llb.State {
 		).Root()
 	}
 
+	// Write the user-supplied build-time env vars as files under /platform/env/<NAME>
+	// (CNB platform contract). The lifecycle build phase reads these and exposes them
+	// to buildpacks, so BP_* configuration (e.g. BP_CPYTHON_VERSION, BP_JVM_VERSION)
+	// works exactly as it does with standard pack. File contents are the raw value;
+	// default modifier is overwrite/append per the CNB spec. Deterministic key order
+	// keeps the LLB stable for cache reuse.
+	if len(in.buildEnv) > 0 {
+		keys := make([]string, 0, len(in.buildEnv))
+		for k := range in.buildEnv {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+		for _, k := range keys {
+			base = base.File(
+				llb.Mkfile(path.Join("/platform/env", k), 0644, []byte(in.buildEnv[k])),
+				llb.WithCustomNamef("[%s] platform env: %s", plat, k),
+			)
+		}
+	}
+
 	appSrc := llb.Local(contextLocalName)
 	base = base.File(
 		llb.Copy(appSrc, "/", "/workspace", &llb.CopyInfo{CreateDestPath: true, AllowWildcard: true, AllowEmptyWildcard: true}),
@@ -444,6 +483,23 @@ func buildEmitLLB(in nativeBuildInputs, p ocispecs.Platform) llb.State {
 	}
 	if in.targetDistroVersion != "" {
 		env = append(env, llb.AddEnv("CNB_TARGET_DISTRO_VERSION", in.targetDistroVersion))
+	}
+	if in.experimentalMode != "" {
+		env = append(env, llb.AddEnv("CNB_EXPERIMENTAL_MODE", in.experimentalMode))
+	}
+	if in.sourceDateEpoch != "" {
+		env = append(env, llb.AddEnv("SOURCE_DATE_EPOCH", in.sourceDateEpoch))
+	}
+	// Proxy vars (both UPPER and lower case), matching standard pack's
+	// WithLifecycleProxy, so buildpacks that download dependencies work behind a proxy.
+	if in.httpProxy != "" {
+		env = append(env, llb.AddEnv("HTTP_PROXY", in.httpProxy), llb.AddEnv("http_proxy", in.httpProxy))
+	}
+	if in.httpsProxy != "" {
+		env = append(env, llb.AddEnv("HTTPS_PROXY", in.httpsProxy), llb.AddEnv("https_proxy", in.httpsProxy))
+	}
+	if in.noProxy != "" {
+		env = append(env, llb.AddEnv("NO_PROXY", in.noProxy), llb.AddEnv("no_proxy", in.noProxy))
 	}
 	if in.registryAuth != "" {
 		env = append(env, llb.AddEnv("CNB_REGISTRY_AUTH", in.registryAuth))

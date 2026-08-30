@@ -81,3 +81,29 @@ Package tests + vet pass.
 - Version note: with the app's `python = "^3.10"` the buildpack selects the newest
   (3.14.7). That's fine now that prebuilt is used; pinning would only matter for an
   exact apples-to-apples version match with the Dockerfile's 3.12.
+
+
+## Follow-up: full CNB + user env parity (not just CNB_STACK_ID)
+
+The CNB_STACK_ID gap was one symptom of a broader issue — the buildkit-native path
+was not passing the full environment that standard pack passes. Fixed to match pack:
+
+- **CNB platform env**: CNB_PLATFORM_API, CNB_USER_ID, CNB_GROUP_ID, CNB_STACK_ID,
+  CNB_TARGET_OS, CNB_TARGET_ARCH, CNB_TARGET_ARCH_VARIANT, CNB_TARGET_DISTRO_NAME,
+  CNB_TARGET_DISTRO_VERSION, CNB_EXPERIMENTAL_MODE, SOURCE_DATE_EPOCH,
+  CNB_REGISTRY_AUTH.
+- **Proxy vars** (UPPER + lower): HTTP_PROXY/HTTPS_PROXY/NO_PROXY — resolved via
+  Client.processProxyConfig (explicit opts, else host env), matching
+  WithLifecycleProxy.
+- **User build env** (pack --env / --env-file + project.toml [[build.env]]): written
+  as files under /platform/env/<NAME> in the LLB (the CNB platform contract), so
+  buildpacks read them as BP_* configuration. Verified: `--env BP_CPYTHON_VERSION=3.12.*`
+  makes the cpython buildpack select 3.12.13 instead of 3.14.7.
+
+Wiring: PlatformBuildOpts (BuildEnv, ExperimentalMode, SourceDateEpoch, HTTPProxy/
+HTTPSProxy/NoProxy, StackID, TargetDistro*) -> nativeBuildInputs -> the lifecycle RUN
+env / a /platform/env write step in native_buildfunc.go. Values sourced in
+buildMultiPlatform (pkg/client/build.go) from opts + the builder image labels.
+
+Not applicable to the publish-only buildkit path (intentionally skipped):
+CNB_USE_LAYOUT / CNB_LAYOUT_DIR (OCI-layout local export only).

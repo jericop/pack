@@ -204,6 +204,20 @@ type PlatformBuildOpts struct {
 	// the same reason.
 	TargetDistroName    string
 	TargetDistroVersion string
+	// BuildEnv is the user-supplied build-time environment (pack --env / --env-file +
+	// project.toml [[build.env]]). Written to /platform/env/<NAME> so buildpacks read
+	// it as BP_* configuration, matching standard pack.
+	BuildEnv map[string]string
+	// ExperimentalMode is passed as CNB_EXPERIMENTAL_MODE (e.g. "warn") when set.
+	ExperimentalMode string
+	// SourceDateEpoch is passed as SOURCE_DATE_EPOCH (Unix seconds) for reproducible
+	// timestamps when a creation time is configured.
+	SourceDateEpoch string
+	// HTTPProxy / HTTPSProxy / NoProxy are propagated to the lifecycle phases (both
+	// upper and lower case) so buildpacks that fetch dependencies work behind a proxy.
+	HTTPProxy  string
+	HTTPSProxy string
+	NoProxy    string
 }
 
 // PlatformBuildResult describes the outcome of building for a single platform.

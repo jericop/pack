@@ -920,6 +920,32 @@ func (c *Client) buildMultiPlatform(ctx context.Context, opts BuildOptions, life
 	// Resolve docker config path for registry auth
 	dockerConfigPath := resolveDockerConfigPath()
 
+	// Collect user-supplied build-time env (project.toml [[build.env]] first, then
+	// --env / --env-file overrides) exactly like the standard path (see the buildEnvs
+	// map in Build). These are written to /platform/env by the backend so buildpacks
+	// read them as BP_* configuration.
+	buildEnvs := map[string]string{}
+	for _, envVar := range opts.ProjectDescriptor.Build.Env {
+		buildEnvs[envVar.Name] = envVar.Value
+	}
+	for k, v := range opts.Env {
+		buildEnvs[k] = v
+	}
+
+	// CNB platform env parity with standard pack.
+	experimentalMode := ""
+	if c.experimental {
+		experimentalMode = "warn"
+	}
+	sourceDateEpoch := ""
+	if opts.CreationTime != nil {
+		sourceDateEpoch = strconv.Itoa(int(opts.CreationTime.Unix()))
+	}
+
+	// Resolve proxy config the same way the standard path does (explicit opts, else
+	// host env), so buildpacks can fetch dependencies behind a proxy.
+	proxyConfig := c.processProxyConfig(opts.ProxyConfig)
+
 	// Build the platform options (shared across all architectures)
 	platformBuildOpts := multiplatform.PlatformBuildOpts{
 		BuilderImage:     lifecycleOpts.BuilderImage,
@@ -947,6 +973,12 @@ func (c *Client) buildMultiPlatform(ctx context.Context, opts BuildOptions, life
 		StackID:             builderImageLabel(lifecycleOpts.Builder.Image(), "io.buildpacks.stack.id"),
 		TargetDistroName:    builderDistroLabel(lifecycleOpts.Builder.Image(), "name"),
 		TargetDistroVersion: builderDistroLabel(lifecycleOpts.Builder.Image(), "version"),
+		BuildEnv:            buildEnvs,
+		ExperimentalMode:    experimentalMode,
+		SourceDateEpoch:     sourceDateEpoch,
+		HTTPProxy:           proxyConfig.HTTPProxy,
+		HTTPSProxy:          proxyConfig.HTTPSProxy,
+		NoProxy:             proxyConfig.NoProxy,
 	}
 
 	// If the user explicitly passed --lifecycle-image, use it regardless of trust mode
