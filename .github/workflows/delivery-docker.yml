@@ -74,9 +74,12 @@ jobs:
       - uses: buildpacks/github-actions/setup-tools@v5.9.4
       - name: Buildx Build/Publish
         run: |
+          # Fork scope: build only the platforms we test on (amd64 + arm64).
+          # The upstream image also ships s390x/ppc64le, but those add slow
+          # emulated builds we don't need for this POC.
           docker buildx build . \
             --tag ${{ env.IMG_NAME }}:${{ steps.version.outputs.result }}${{ matrix.suffix }} \
-            --platform linux/amd64,linux/arm64,linux/s390x,linux/ppc64le \
+            --platform linux/amd64,linux/arm64 \
             --build-arg pack_version=${{ steps.version.outputs.result }} \
             --build-arg base_image=${{ matrix.base_image }} \
             --provenance=false \
