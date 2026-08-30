@@ -60,6 +60,12 @@ func (b *BuildkitBackend) startProgressDisplay(prefix string) chan *client.Solve
 	ch := make(chan *client.SolveStatus)
 	vertexStartTimes := make(map[string]int64)
 	vertexNumbers := make(map[string]int)
+	// vertexArch maps a vertex digest -> its "[os/arch]" label (parsed from the
+	// vertex name). Log lines reference their vertex only by number, so without
+	// this they would print with no architecture and be impossible to attribute
+	// in a multi-platform solve. We prepend the owning vertex's arch to every
+	// log line so each line is self-describing.
+	vertexArch := make(map[string]string)
 	vertexCounter := 0
 	// tag is " <prefix>" when a prefix is set, else "" — so an empty prefix does not
 	// produce a double space. Each vertex name already carries a "[os/arch]" prefix.
@@ -75,6 +81,7 @@ func (b *BuildkitBackend) startProgressDisplay(prefix string) chan *client.Solve
 					vertexCounter++
 					vertexStartTimes[id] = v.Started.UnixMilli()
 					vertexNumbers[id] = vertexCounter
+					vertexArch[id] = archLabelFromVertexName(v.Name)
 					fmt.Fprintf(os.Stderr, "#%d%s %s\n", vertexCounter, tag, v.Name)
 				}
 				if v.Completed != nil {
@@ -94,23 +101,50 @@ func (b *BuildkitBackend) startProgressDisplay(prefix string) chan *client.Solve
 				}
 			}
 			for _, l := range status.Logs {
-				stepNum := 0
-				for id, num := range vertexNumbers {
-					if id == l.Vertex.String() {
-						stepNum = num
-						break
-					}
+				id := l.Vertex.String()
+				stepNum := vertexNumbers[id]
+				// arch is the owning vertex's "[os/arch]" label; prepend it (with a
+				// leading space) so every log line carries its architecture. When a
+				// vertex has no arch label (single-platform / non-prefixed vertex),
+				// this is empty and the line reads as before.
+				arch := vertexArch[id]
+				if arch != "" {
+					arch = " " + arch
 				}
 				lines := strings.Split(string(l.Data), "\n")
 				for _, line := range lines {
 					if line != "" {
-						fmt.Fprintf(os.Stderr, "#%d%s %s\n", stepNum, tag, line)
+						fmt.Fprintf(os.Stderr, "#%d%s%s %s\n", stepNum, tag, arch, line)
 					}
 				}
 			}
 		}
 	}()
 	return ch
+}
+
+// archLabelFromVertexName extracts a leading "[os/arch]" token from a BuildKit
+// vertex name (vertices are named with an "[os/arch] ..." prefix via
+// platformLabel/WithCustomNamef). It returns the bracketed label including the
+// brackets (e.g. "[linux/arm64]"), or "" when the name has no such prefix (for
+// example internal vertices BuildKit names itself, or single-platform builds
+// that don't prefix). Only a leading, well-formed "[...]" token is treated as an
+// arch label so arbitrary bracketed text mid-name is not misread.
+func archLabelFromVertexName(name string) string {
+	if !strings.HasPrefix(name, "[") {
+		return ""
+	}
+	end := strings.IndexByte(name, ']')
+	if end <= 1 {
+		return ""
+	}
+	inner := name[1:end]
+	// A platform label always contains a "/" (os/arch[/variant]); this avoids
+	// treating things like "[internal]" as an architecture.
+	if !strings.Contains(inner, "/") {
+		return ""
+	}
+	return name[:end+1]
 }
 
 // parseCacheImports converts BuildkitOpts.CacheFrom strings to CacheOptionsEntry.

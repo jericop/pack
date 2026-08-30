@@ -173,8 +173,11 @@ func (b *BuildkitBackend) driveNative(ctx context.Context, bkClient *client.Clie
 	}
 
 	// Empty progress prefix: each vertex name already carries a "[os/arch]" prefix
-	// (see platformLabel in native_buildfunc.go), so lines read
-	// "#15 [linux/arm64] lifecycle: analyzer" without a redundant backend tag.
+	// (see platformLabel in native_buildfunc.go), so vertex lines read
+	// "#15 [linux/arm64] lifecycle: analyzer" without a redundant backend tag. The
+	// display also prepends that same "[os/arch]" to each vertex's LOG lines, so
+	// every streamed build line is attributable to an architecture in a
+	// multi-platform solve.
 	ch := b.startProgressDisplay("")
 	b.logger.Infof("Building %s via buildkit (%d platform(s))", opts.ImageName, len(platforms))
 
