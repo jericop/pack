@@ -59,22 +59,22 @@ on:
         required: false
         default: "paketobuildpacks/ubuntu-noble-run:latest"
       samples_repo:
-        description: "Samples repo to checkout (org/name)"
+        description: "Samples repo to checkout (org/name). Must use the <lang>/<app> layout (paketo-buildpacks/samples), not buildpacks/samples (apps/<name>)."
         required: false
-        default: "buildpacks/samples"
+        default: "paketo-buildpacks/samples"
 
 env:
   PACK_IMAGE: ${{ github.event.inputs.pack_image || '' }}
   PACK_REF: ${{ github.event.inputs.pack_ref || 'buildkit-native-export' }}
   BUILDER: ${{ github.event.inputs.builder || 'jericop/ubuntu-noble-builder:buildkit-native-export' }}
   RUN_IMAGE: ${{ github.event.inputs.run_image || 'paketobuildpacks/ubuntu-noble-run:latest' }}
-  SAMPLES_REPO: ${{ github.event.inputs.samples_repo || 'buildpacks/samples' }}
+  SAMPLES_REPO: ${{ github.event.inputs.samples_repo || 'paketo-buildpacks/samples' }}
   HOST_PLATFORM: linux/amd64          # CI runners are amd64
   MULTI_PLATFORMS: linux/amd64,linux/arm64
 
 jobs:
   bench:
-    name: "${{ matrix.id }} / ${{ matrix.build_type }}"
+    name: "${{ matrix.app.id }} / ${{ matrix.build_type }}"
     strategy:
       fail-fast: false
       matrix:
@@ -168,17 +168,22 @@ jobs:
         id: cmd
         run: |
           app_path="${GITHUB_WORKSPACE}/samples/${{ matrix.app.name }}"
+          if [ ! -d "$app_path" ]; then
+            echo "app path not found: $app_path (is SAMPLES_REPO=$SAMPLES_REPO using the <lang>/<app> layout?)" >&2
+            ls -1 "${GITHUB_WORKSPACE}/samples" >&2 || true
+            exit 1
+          fi
           case "${{ matrix.build_type }}" in
             docker-daemon-single)
-              img="cmp-${{ matrix.id }}-${{ github.run_id }}:latest"
+              img="cmp-${{ matrix.app.id }}-${{ github.run_id }}:latest"
               common="--path $app_path --builder $BUILDER --run-image $RUN_IMAGE --platform $HOST_PLATFORM --trust-builder"
               ;;
             buildkit-single)
-              img="${{ secrets.DOCKERHUB_ORG }}/bench-bk-single-${{ matrix.id }}-${{ github.run_id }}:latest"
+              img="${{ secrets.DOCKERHUB_ORG }}/bench-bk-single-${{ matrix.app.id }}-${{ github.run_id }}:latest"
               common="--path $app_path --builder $BUILDER --run-image $RUN_IMAGE --platform $HOST_PLATFORM --build-backend buildkit --buildkit-builder pack-multiplatform --publish --trust-builder"
               ;;
             buildkit-multi)
-              img="${{ secrets.DOCKERHUB_ORG }}/bench-bk-multi-${{ matrix.id }}-${{ github.run_id }}:latest"
+              img="${{ secrets.DOCKERHUB_ORG }}/bench-bk-multi-${{ matrix.app.id }}-${{ github.run_id }}:latest"
               plat_args="--platform linux/amd64 --platform linux/arm64"
               common="--path $app_path --builder $BUILDER --run-image $RUN_IMAGE $plat_args --build-backend buildkit --buildkit-builder pack-multiplatform --publish --trust-builder"
               ;;
@@ -218,15 +223,15 @@ jobs:
         run: |
           mkdir -p rows
           # CSV: app,build_type,cold,rebuild,rebase
-          echo "${{ matrix.app.name }},${{ matrix.build_type }},${{ steps.cold.outputs.seconds }},${{ steps.rebuild.outputs.seconds }},${{ steps.rebase.outputs.seconds }}" > "rows/${{ matrix.id }}-${{ matrix.build_type }}.csv"
-          cat "rows/${{ matrix.id }}-${{ matrix.build_type }}.csv"
+          echo "${{ matrix.app.name }},${{ matrix.build_type }},${{ steps.cold.outputs.seconds }},${{ steps.rebuild.outputs.seconds }},${{ steps.rebase.outputs.seconds }}" > "rows/${{ matrix.app.id }}-${{ matrix.build_type }}.csv"
+          cat "rows/${{ matrix.app.id }}-${{ matrix.build_type }}.csv"
 
       - name: Upload row
         if: ${{ always() }}
         uses: actions/upload-artifact@v4
         with:
-          name: bench-row-${{ matrix.id }}-${{ matrix.build_type }}
-          path: rows/${{ matrix.id }}-${{ matrix.build_type }}.csv
+          name: bench-row-${{ matrix.app.id }}-${{ matrix.build_type }}
+          path: rows/${{ matrix.app.id }}-${{ matrix.build_type }}.csv
 
   aggregate:
     needs: bench
