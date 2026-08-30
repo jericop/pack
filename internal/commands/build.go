@@ -15,6 +15,7 @@ import (
 
 	bldr "github.com/buildpacks/pack/internal/builder"
 
+	"github.com/buildpacks/pack/internal/build/multiplatform"
 	"github.com/buildpacks/pack/internal/config"
 	"github.com/buildpacks/pack/internal/style"
 	"github.com/buildpacks/pack/pkg/cache"
@@ -52,6 +53,7 @@ type BuildFlags struct {
 	BuildkitExportMode        string
 	BuildkitOCILayoutDir      string
 	BuildkitOCILayoutDirClear bool
+	BuildkitFixRemoteMetadata bool
 	Policy                    string
 	Network                   string
 	DescriptorPath            string
@@ -93,6 +95,17 @@ func Build(logger logging.Logger, cfg config.Config, packClient PackClient) *cob
 			inputImageName := client.ParseInputImageReference(args[0])
 			if err := validateBuildFlags(&flags, cfg, inputImageName, logger); err != nil {
 				return err
+			}
+
+			// Self-healing short-circuit: --buildkit-fix-remote-image-metadata does NOT
+			// build. It re-finalizes an EXISTING pushed image (the image-name argument),
+			// authoring CNB metadata from its actual layers + the buildkit-native
+			// build-metadata label. No builder, app path, or run image is needed.
+			if flags.BuildkitFixRemoteMetadata {
+				if flags.BuildBackend != "" && flags.BuildBackend != string(multiplatform.BackendBuildkitNative) {
+					return errors.Errorf("--buildkit-fix-remote-image-metadata is only valid with --build-backend %s", multiplatform.BackendBuildkitNative)
+				}
+				return multiplatform.FixRemoteImageMetadata(cmd.Context(), logger, inputImageName.Name(), false)
 			}
 
 			inputPreviousImage := client.ParseInputImageReference(flags.PreviousImage)
@@ -313,6 +326,7 @@ This option may set DOCKER_HOST environment variable for the build container if 
 	cmd.Flags().StringVar(&buildFlags.BuildkitExportMode, "buildkit-export-mode", "registry", `How per-arch images are exported. "registry" (default): lifecycle pushes per-arch tags; "oci-layout": export to disk and push atomically (no temp tags).`)
 	cmd.Flags().StringVar(&buildFlags.BuildkitOCILayoutDir, "buildkit-oci-layout-dir", "", `[oci-layout mode] Directory to write per-arch OCI layout artifacts to (a unique per-build subdirectory is created under it). When set, artifacts are kept for debugging and you are responsible for cleanup. When empty (default), a temp directory is used and removed after the build.`)
 	cmd.Flags().BoolVar(&buildFlags.BuildkitOCILayoutDirClear, "buildkit-oci-layout-dir-clear", false, `[oci-layout mode] Clear the --buildkit-oci-layout-dir directory before the build starts. Requires --buildkit-oci-layout-dir.`)
+	cmd.Flags().BoolVar(&buildFlags.BuildkitFixRemoteMetadata, "buildkit-fix-remote-image-metadata", false, `[buildkit-native] Self-healing: do NOT build. Finalize an EXISTING pushed image (the image name argument) that still carries the buildkit-native build-metadata label, authoring the correct io.buildpacks.lifecycle.metadata from its actual layers and re-pushing config+manifest only. Idempotent.`)
 	cmd.Flags().StringVar(&buildFlags.Policy, "pull-policy", "", `Pull policy to use. Accepted values are always, never, and if-not-present. (default "always")`)
 	cmd.Flags().StringVar(&buildFlags.ExecutionEnv, "exec-env", "production", `Execution environment to use. (default "production"`)
 	cmd.Flags().StringVarP(&buildFlags.Registry, "buildpack-registry", "r", cfg.DefaultRegistryName, "Buildpack Registry by name")

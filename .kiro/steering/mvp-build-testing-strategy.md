@@ -44,6 +44,26 @@ Always use `samples/go/no-imports`:
    docker buildx ls
    ```
 
+## Terminology: "wall time" (wall-clock time)
+
+Throughout this doc, **wall time** (a.k.a. wall-clock time or elapsed time) means
+the total real-world elapsed duration of a command from start to finish — what a
+stopwatch on the wall would show — regardless of how many CPU cores or parallel
+operations were involved. It is the number a user actually waits.
+
+Concretely, it is the **`real`** value reported by the shell `time` builtin (or the
+difference between the `START:`/`END:` timestamps we log):
+
+```
+real    1m23.4s     <-- WALL TIME: elapsed time you waited
+user    0m41.2s         (CPU time in user space, summed across cores)
+sys     0m6.8s          (CPU time in the kernel, summed across cores)
+```
+
+Note `user + sys` can EXCEED wall time when work runs in parallel (multiple cores),
+so they are not the "time you waited" — only `real`/wall time is. Unless stated
+otherwise, every duration in the benchmark tables below is wall time.
+
 ## The two-build comparison (core of the strategy)
 
 Run the SAME `pack build` twice and save full output + duration for each, so we
