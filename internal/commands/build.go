@@ -50,9 +50,6 @@ type BuildFlags struct {
 	BuildkitBuilder           string
 	BuildkitCacheFrom         []string
 	BuildkitCacheTo           []string
-	BuildkitExportMode        string
-	BuildkitOCILayoutDir      string
-	BuildkitOCILayoutDirClear bool
 	BuildkitFixRemoteMetadata bool
 	Policy                    string
 	Network                   string
@@ -97,13 +94,14 @@ func Build(logger logging.Logger, cfg config.Config, packClient PackClient) *cob
 				return err
 			}
 
-			// Self-healing short-circuit: --buildkit-fix-remote-image-metadata does NOT
-			// build. It re-finalizes an EXISTING pushed image (the image-name argument),
-			// authoring CNB metadata from its actual layers + the buildkit-native
-			// build-metadata label. No builder, app path, or run image is needed.
+			// Self-healing short-circuit: --buildkit-fix-image-metadata does NOT
+			// build. It re-applies CNB metadata to an EXISTING pushed image (the
+			// image-name argument), authoring it from the image's actual layers +
+			// the prepared-metadata label. No builder, app path, or run image is
+			// needed.
 			if flags.BuildkitFixRemoteMetadata {
-				if flags.BuildBackend != "" && flags.BuildBackend != string(multiplatform.BackendBuildkitNative) {
-					return errors.Errorf("--buildkit-fix-remote-image-metadata is only valid with --build-backend %s", multiplatform.BackendBuildkitNative)
+				if flags.BuildBackend != "" && flags.BuildBackend != string(multiplatform.BackendBuildkit) {
+					return errors.Errorf("--buildkit-fix-image-metadata is only valid with --build-backend %s", multiplatform.BackendBuildkit)
 				}
 				return multiplatform.FixRemoteImageMetadata(cmd.Context(), logger, inputImageName.Name(), false)
 			}
@@ -214,9 +212,6 @@ func Build(logger logging.Logger, cfg config.Config, packClient PackClient) *cob
 				BuildkitBuilder:           flags.BuildkitBuilder,
 				BuildkitCacheFrom:         flags.BuildkitCacheFrom,
 				BuildkitCacheTo:           flags.BuildkitCacheTo,
-				BuildkitExportMode:        flags.BuildkitExportMode,
-				BuildkitOCILayoutDir:      flags.BuildkitOCILayoutDir,
-				BuildkitOCILayoutDirClear: flags.BuildkitOCILayoutDirClear,
 				PullPolicy:                pullPolicy,
 				ClearCache:                flags.ClearCache,
 				TrustBuilder: func(string) bool {
@@ -319,14 +314,11 @@ This option may set DOCKER_HOST environment variable for the build container if 
 	cmd.Flags().StringVar(&buildFlags.Platform, "platform", "", `Platform to build on (e.g., "linux/amd64").`)
 	cmd.Flags().StringVar(&buildFlags.Platforms, "platforms", "", `Comma-separated list of target platforms for multi-architecture builds (e.g., "linux/amd64,linux/arm64"). Requires --buildkit. Requires --publish or produces local OCI layouts.`)
 	cmd.Flags().BoolVar(&buildFlags.Buildkit, "buildkit", false, `[experimental] Use BuildKit backend for building. Required for multi-platform builds.`)
-	cmd.Flags().StringVar(&buildFlags.BuildBackend, "build-backend", "", `Build backend for multi-platform builds. Values: "buildkit-dockerfile" (default), "buildkit-llb", "buildkit-native" (experimental).`)
+	cmd.Flags().StringVar(&buildFlags.BuildBackend, "build-backend", "", `Build backend for multi-platform builds. Values: "auto" (default) or "buildkit"; both use the BuildKit backend today.`)
 	cmd.Flags().StringVar(&buildFlags.BuildkitBuilder, "buildkit-builder", "", `Name of the buildx builder to use for multi-platform builds (default: current buildx default).`)
 	cmd.Flags().StringArrayVar(&buildFlags.BuildkitCacheFrom, "buildkit-cache-from", nil, `External cache source for buildkit (e.g., "type=registry,ref=myapp-cache:latest").`)
 	cmd.Flags().StringArrayVar(&buildFlags.BuildkitCacheTo, "buildkit-cache-to", nil, `External cache destination for buildkit (e.g., "type=registry,ref=myapp-cache:latest,mode=max").`)
-	cmd.Flags().StringVar(&buildFlags.BuildkitExportMode, "buildkit-export-mode", "registry", `How per-arch images are exported. "registry" (default): lifecycle pushes per-arch tags; "oci-layout": export to disk and push atomically (no temp tags).`)
-	cmd.Flags().StringVar(&buildFlags.BuildkitOCILayoutDir, "buildkit-oci-layout-dir", "", `[oci-layout mode] Directory to write per-arch OCI layout artifacts to (a unique per-build subdirectory is created under it). When set, artifacts are kept for debugging and you are responsible for cleanup. When empty (default), a temp directory is used and removed after the build.`)
-	cmd.Flags().BoolVar(&buildFlags.BuildkitOCILayoutDirClear, "buildkit-oci-layout-dir-clear", false, `[oci-layout mode] Clear the --buildkit-oci-layout-dir directory before the build starts. Requires --buildkit-oci-layout-dir.`)
-	cmd.Flags().BoolVar(&buildFlags.BuildkitFixRemoteMetadata, "buildkit-fix-remote-image-metadata", false, `[buildkit-native] Self-healing: do NOT build. Finalize an EXISTING pushed image (the image name argument) that still carries the buildkit-native build-metadata label, authoring the correct io.buildpacks.lifecycle.metadata from its actual layers and re-pushing config+manifest only. Idempotent.`)
+	cmd.Flags().BoolVar(&buildFlags.BuildkitFixRemoteMetadata, "buildkit-fix-image-metadata", false, `[buildkit] Self-healing: do NOT build. Apply CNB metadata to an EXISTING pushed image (the image name argument) that still carries the prepared-metadata label, authoring the correct io.buildpacks.lifecycle.metadata from its actual layers and re-pushing config+manifest only. Idempotent.`)
 	cmd.Flags().StringVar(&buildFlags.Policy, "pull-policy", "", `Pull policy to use. Accepted values are always, never, and if-not-present. (default "always")`)
 	cmd.Flags().StringVar(&buildFlags.ExecutionEnv, "exec-env", "production", `Execution environment to use. (default "production"`)
 	cmd.Flags().StringVarP(&buildFlags.Registry, "buildpack-registry", "r", cfg.DefaultRegistryName, "Buildpack Registry by name")
@@ -353,9 +345,6 @@ This option may set DOCKER_HOST environment variable for the build container if 
 		cmd.Flags().MarkHidden("buildkit-builder")
 		cmd.Flags().MarkHidden("buildkit-cache-from")
 		cmd.Flags().MarkHidden("buildkit-cache-to")
-		cmd.Flags().MarkHidden("buildkit-export-mode")
-		cmd.Flags().MarkHidden("buildkit-oci-layout-dir")
-		cmd.Flags().MarkHidden("buildkit-oci-layout-dir-clear")
 	}
 }
 

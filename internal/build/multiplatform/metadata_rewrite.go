@@ -8,7 +8,7 @@ import (
 // The former host-side metadata-SHA REWRITE logic that lived here is SUPERSEDED by
 // Option A (build-then-finalize): the lifecycle `phase/finalize` library now AUTHORS
 // the correct io.buildpacks.lifecycle.metadata on the pushed image from its actual
-// produced diffIDs + the io.buildpacks.buildkit.native.build-metadata label. Pack
+// produced diffIDs + the io.buildpacks.lifecycle.prepared-metadata label. Pack
 // consumes finalize.Finalize in-process (see backend_native.go), so pack no longer
 // hand-rewrites CNB metadata. Only the test-env registry-remap shim remains here.
 

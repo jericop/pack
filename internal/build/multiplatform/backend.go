@@ -1,6 +1,7 @@
 // Package multiplatform provides abstractions for building container images
-// across multiple architectures using different build backends (BuildKit LLB,
-// BuildKit via Dockerfile + CLI, and in the future Buildah).
+// across multiple architectures. Today the sole backend is BuildKit (the Go SDK
+// / LLB, buildkit-native-export); the BuildBackend abstraction is retained so an
+// alternative (e.g. buildah-podman) can be added later.
 package multiplatform
 
 import (
@@ -15,21 +16,16 @@ import (
 type BackendType string
 
 const (
-	// BackendBuildkitDockerfile generates a Dockerfile and shells out to `docker buildx build`.
-	BackendBuildkitDockerfile BackendType = "buildkit-dockerfile"
+	// BackendBuildkit uses the BuildKit Go SDK to run detector + builder +
+	// the lifecycle's prepare-image-metadata mode as RUN steps (producing the
+	// metadata contract inside BuildKit), then assembles the final CNB app image
+	// natively in BuildKit (FROM run-image + add the produced layers + apply the
+	// prepared config) and exports it via BuildKit's native multi-platform image
+	// export. No layer-data egress to the host. This is the sole backend today;
+	// the abstraction is retained for a future buildah-podman backend.
+	BackendBuildkit BackendType = "buildkit"
 
-	// BackendBuildkitLLB uses the BuildKit Go SDK to construct and solve an LLB graph directly.
-	BackendBuildkitLLB BackendType = "buildkit-llb"
-
-	// BackendBuildkitNative uses the BuildKit Go SDK to run detector + builder +
-	// the lifecycle's emit-mode as RUN steps (producing the emit contract inside
-	// BuildKit), then assembles the final CNB app image natively in BuildKit
-	// (FROM run-image + add the emitted layers + apply the emitted config) and
-	// exports it via BuildKit's native multi-platform image export. EXPERIMENTAL
-	// (Option C: buildkit-native-export). No layer-data egress to the host.
-	BackendBuildkitNative BackendType = "buildkit-native"
-
-	// BackendAuto auto-detects the best available backend.
+	// BackendAuto auto-detects the best available backend (currently buildkit).
 	BackendAuto BackendType = "auto"
 )
 
@@ -142,9 +138,6 @@ type PlatformBuildOpts struct {
 	// Publish indicates whether to push the image to a registry.
 	Publish bool
 
-	// OutputDir is the local directory for OCI layout output (when not publishing).
-	OutputDir string
-
 	// DockerConfigPath is the path to Docker config.json for registry auth.
 	DockerConfigPath string
 
@@ -182,9 +175,6 @@ type PlatformBuildOpts struct {
 	// Contains pre-resolved auth headers for registries, eliminating the need for
 	// docker config file mounts inside buildkit.
 	RegistryAuth string
-
-	// ExportMode controls whether the lifecycle pushes to a registry or writes OCI layout to disk.
-	ExportMode ExportMode
 }
 
 // PlatformBuildResult describes the outcome of building for a single platform.
@@ -197,43 +187,24 @@ type PlatformBuildResult struct {
 
 	// Platform is the platform this result corresponds to.
 	Platform Platform
-
-	// OCIStoreDir is the on-disk content store directory holding the Phase 1 OCI
-	// layout for this platform (OCI layout mode only). Phase 2 opens/attaches this
-	// store to import the layout via llb.OCILayout (FR-4).
-	OCIStoreDir string
-
-	// OCILayoutDigest is the manifest digest of the Phase 1 OCI layout image
-	// (OCI layout mode only). Phase 2 uses it to build the import reference
-	// "<ref>@<digest>" for llb.OCILayout.
-	OCILayoutDigest string
 }
 
 // BackendCapabilities describes what a build backend supports.
 type BackendCapabilities struct {
-	// SupportsLLB indicates the backend can construct LLB graphs directly.
-	SupportsLLB bool
-
 	// SupportsCacheMounts indicates the backend supports persistent cache mounts.
 	SupportsCacheMounts bool
 
 	// SupportsParallelArch indicates the backend can build multiple architectures in parallel.
 	SupportsParallelArch bool
 
-	// SupportsOCILayout indicates the backend can output images in OCI layout format.
-	SupportsOCILayout bool
-
 	// SupportsSecretMounts indicates the backend can mount secrets into build steps.
 	SupportsSecretMounts bool
 
 	// PushesNatively indicates the backend performs the final registry push /
 	// manifest-list assembly itself, so the executor MUST skip its own
-	// assembly/push. The LLB backend sets this true in OCI layout mode: it
-	// imports each per-arch OCI layout and either pushes it natively via
-	// ExporterImage (single-arch) or assembles + pushes one manifest list from
-	// the per-arch layouts (multi-arch), all with NO intermediate tags (FR-5).
-	// The Dockerfile backend leaves this false — the executor still assembles the
-	// manifest list from per-arch tags via `docker buildx imagetools create`.
+	// assembly/push. The buildkit backend sets this true: it exports the
+	// (multi-platform) image via BuildKit's native image exporter — one
+	// image/index, no intermediate tags.
 	PushesNatively bool
 }
 
@@ -259,9 +230,6 @@ type BuildkitOpts struct {
 
 	// CacheTo is a list of external cache destinations.
 	CacheTo []string
-
-	// ExtraArgs are additional arguments passed to docker buildx build (Dockerfile backend only).
-	ExtraArgs []string
 }
 
 // MultiPlatformBuildOpts contains all the options needed for a full multi-platform build.
@@ -283,21 +251,6 @@ type MultiPlatformBuildOpts struct {
 
 	// Publish indicates whether to push the final manifest list to a registry.
 	Publish bool
-
-	// ExportMode controls how per-arch images are produced.
-	// "registry" (default): lifecycle pushes per-arch images to registry tags, then manifest list is assembled.
-	// "oci-layout": lifecycle exports to OCI layout on disk, pack assembles and pushes atomically (no temp tags).
-	ExportMode ExportMode
 }
 
-// ExportMode defines how per-arch images are exported from buildkit.
-type ExportMode string
 
-const (
-	// ExportRegistry has the lifecycle push per-arch images to registry tags during the build.
-	ExportRegistry ExportMode = "registry"
-
-	// ExportOCILayout has the lifecycle export to OCI layout on disk, then pack assembles
-	// the manifest list and pushes atomically using go-containerregistry.
-	ExportOCILayout ExportMode = "oci-layout"
-)

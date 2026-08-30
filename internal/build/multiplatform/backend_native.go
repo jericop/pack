@@ -16,67 +16,60 @@ import (
 	"github.com/buildpacks/pack/pkg/logging"
 )
 
-// NativeBackend implements BuildBackend for the EXPERIMENTAL "buildkit-native"
-// approach (Option C: buildkit-native-export). It runs the lifecycle
-// detector/builder phases as RUN steps and then runs the exporter in EMIT-MODE
-// (-emit-export-plan) so the lifecycle records the layer plan + image config as a
-// small contract (plan.json + config.json) INSIDE BuildKit instead of assembling
-// and pushing an image. Pack then assembles the final CNB app image natively in
-// BuildKit (FROM run-image + add the emitted layers by diffID + apply the emitted
-// config) and exports it via BuildKit's native multi-platform image export.
+// BuildkitBackend implements BuildBackend for the buildkit approach
+// (buildkit-native-export). It runs the lifecycle detector/builder phases as RUN
+// steps and then runs the exporter in PREPARE-IMAGE-METADATA mode so the lifecycle
+// records the layer plan + image config as a small contract INSIDE BuildKit
+// instead of assembling and pushing an image. Pack then assembles the final CNB
+// app image natively in BuildKit (FROM run-image + add the emitted layers by
+// diffID + apply the emitted config) and exports it via BuildKit's native
+// multi-platform image export.
 //
 // The key property: layer DATA never leaves BuildKit. Only the small
 // plan/config metadata crosses to the host (to drive the assembly graph).
 //
-// This backend shares the low-level BuildKit plumbing (daemon connection,
-// progress display, cache import/export, auth) with the LLB backend by holding an
-// *LLBBackend; it implements its own build graph and assembly.
-type NativeBackend struct {
+// It is the sole build backend on this branch. The BuildBackend abstraction is
+// retained so an alternative implementation (e.g. buildah-podman) can be added
+// later. The low-level BuildKit plumbing (daemon connection, progress display,
+// cache import/export, auth) lives in buildkit_client.go.
+type BuildkitBackend struct {
 	logger       logging.Logger
 	buildkitOpts BuildkitOpts
-
-	// llb provides the shared BuildKit plumbing (connectToBuildkit,
-	// startProgressDisplay, parseCacheImports/Exports). The native backend reuses
-	// these rather than duplicating them.
-	llb *LLBBackend
 }
 
-// NewNativeBackend creates a new BuildKit-native build backend.
-func NewNativeBackend(logger logging.Logger, buildkitOpts BuildkitOpts) *NativeBackend {
-	return &NativeBackend{
+// NewBuildkitBackend creates a new buildkit build backend.
+func NewBuildkitBackend(logger logging.Logger, buildkitOpts BuildkitOpts) *BuildkitBackend {
+	return &BuildkitBackend{
 		logger:       logger,
 		buildkitOpts: buildkitOpts,
-		llb:          NewLLBBackend(logger, buildkitOpts),
 	}
 }
 
-func (b *NativeBackend) Name() string {
-	return "buildkit-native"
+func (b *BuildkitBackend) Name() string {
+	return "buildkit"
 }
 
-func (b *NativeBackend) Capabilities() BackendCapabilities {
+func (b *BuildkitBackend) Capabilities() BackendCapabilities {
 	return BackendCapabilities{
-		SupportsLLB:          true,
 		SupportsCacheMounts:  true,
 		SupportsParallelArch: true,
-		SupportsOCILayout:    false,
 		SupportsSecretMounts: true,
-		// The native backend assembles + pushes the final image (and, for
+		// The buildkit backend assembles + pushes the final image (and, for
 		// multi-arch, the manifest list) itself via BuildKit's native
 		// multi-platform image export, so the executor MUST NOT run its own
-		// manifest assembly/push (mirrors the LLB backend's OCI-layout behavior).
+		// manifest assembly/push.
 		PushesNatively: true,
 	}
 }
 
-// Build executes the buildkit-native build for a single platform.
-func (b *NativeBackend) Build(ctx context.Context, opts PlatformBuildOpts) (PlatformBuildResult, error) {
+// Build executes the buildkit build for a single platform.
+func (b *BuildkitBackend) Build(ctx context.Context, opts PlatformBuildOpts) (PlatformBuildResult, error) {
 	results, err := b.BuildMultiPlatform(ctx, []Platform{opts.Platform}, opts)
 	if err != nil {
 		return PlatformBuildResult{}, err
 	}
 	if len(results) == 0 {
-		return PlatformBuildResult{}, fmt.Errorf("no results from buildkit-native build")
+		return PlatformBuildResult{}, fmt.Errorf("no results from buildkit build")
 	}
 	return results[0], nil
 }
@@ -91,8 +84,8 @@ func (b *NativeBackend) Build(ctx context.Context, opts PlatformBuildOpts) (Plat
 // NOTE: steps (3)-(4) — native assembly + multi-platform export — are implemented
 // in assembleAndExport (Tasks 4-5). This method wires the emit-graph solve and
 // contract read-back (Task 3) and delegates assembly/export.
-func (b *NativeBackend) BuildMultiPlatform(ctx context.Context, platforms []Platform, opts PlatformBuildOpts) ([]PlatformBuildResult, error) {
-	bkClient, err := b.llb.connectToBuildkit(ctx)
+func (b *BuildkitBackend) BuildMultiPlatform(ctx context.Context, platforms []Platform, opts PlatformBuildOpts) ([]PlatformBuildResult, error) {
+	bkClient, err := b.connectToBuildkit(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("connecting to buildkit: %w", err)
 	}
@@ -112,7 +105,7 @@ func (b *NativeBackend) BuildMultiPlatform(ctx context.Context, platforms []Plat
 //
 // A single bkClient.Build handles ALL platforms (the BuildFunc builds each and
 // returns per-platform refs).
-func (b *NativeBackend) driveNative(ctx context.Context, bkClient *client.Client, platforms []Platform, opts PlatformBuildOpts) ([]PlatformBuildResult, error) {
+func (b *BuildkitBackend) driveNative(ctx context.Context, bkClient *client.Client, platforms []Platform, opts PlatformBuildOpts) ([]PlatformBuildResult, error) {
 	if !opts.Publish {
 		// MVP: the native path exports via BuildKit's image exporter with
 		// push=true. Non-publish (local daemon/OCI) output is a future addition;
@@ -155,8 +148,8 @@ func (b *NativeBackend) driveNative(ctx context.Context, bkClient *client.Client
 			contextLocalName: appFS,
 		},
 		Session:      []session.Attachable{authProvider},
-		CacheImports: b.llb.parseCacheImports(),
-		CacheExports: b.llb.parseCacheExports(),
+		CacheImports: b.parseCacheImports(),
+		CacheExports: b.parseCacheExports(),
 		// Request the network.host entitlement so the lifecycle phase RUNs (which
 		// run on the builder's host network to reach registries the builder is
 		// attached to) are permitted. The builder must also be started with
@@ -171,8 +164,8 @@ func (b *NativeBackend) driveNative(ctx context.Context, bkClient *client.Client
 		}},
 	}
 
-	ch := b.llb.startProgressDisplay("[buildkit-native]")
-	b.logger.Infof("Building %s via buildkit-native (%d platform(s))", opts.ImageName, len(platforms))
+	ch := b.startProgressDisplay("[buildkit]")
+	b.logger.Infof("Building %s via buildkit (%d platform(s))", opts.ImageName, len(platforms))
 
 	// product="" -> default. nativeBuildFunc is pack's in-process gateway BuildFunc.
 	if _, err := bkClient.Build(ctx, solveOpt, "", makeNativeBuildFunc(in), ch); err != nil {
@@ -181,7 +174,7 @@ func (b *NativeBackend) driveNative(ctx context.Context, bkClient *client.Client
 
 	// Post-push FINALIZE (Option A): author the correct io.buildpacks.lifecycle.metadata
 	// on the pushed image from its ACTUAL produced layer diffIDs + the
-	// io.buildpacks.buildkit.native.build-metadata label the build attached. This is
+	// io.buildpacks.lifecycle.prepared-metadata label the build attached. This is
 	// the lifecycle's finalize LIBRARY (consumed here like phase.Rebaser); it mutates
 	// ONLY the image config+manifest (+ index) — no layer blobs are read, added, or
 	// re-uploaded. The finalized image is rebuildable + rebaseable.
@@ -267,4 +260,6 @@ func isLikelyInsecureRegistry(host string) bool {
 	return !strings.Contains(h, ".")
 }
 
-
+// Ensure BuildkitBackend satisfies the backend interfaces.
+var _ BuildBackend = (*BuildkitBackend)(nil)
+var _ MultiPlatformBuilder = (*BuildkitBackend)(nil)

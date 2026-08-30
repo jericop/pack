@@ -11,7 +11,7 @@ import (
 
 // FixRemoteImageMetadata is the SELF-HEALING entry point for the buildkit-native
 // backend. Given an image reference that BuildKit already built and pushed while
-// still carrying the io.buildpacks.buildkit.native.build-metadata label (e.g. a
+// still carrying the io.buildpacks.lifecycle.prepared-metadata label (e.g. a
 // build whose post-push finalize was interrupted, or an image intentionally left
 // un-finalized), it re-runs the lifecycle finalize step against the REMOTE image
 // WITHOUT rebuilding: it authors the correct io.buildpacks.lifecycle.metadata from

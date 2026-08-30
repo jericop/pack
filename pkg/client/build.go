@@ -191,8 +191,9 @@ type BuildOptions struct {
 	Buildkit bool
 
 	// BuildBackend specifies which multi-platform build backend to use.
-	// Valid values: "auto" (default), "buildkit-dockerfile", "buildkit-llb".
-	// Can also be set via PACK_BUILD_BACKEND environment variable.
+	// Valid values: "auto" (default) and "buildkit"; both resolve to the buildkit
+	// backend today. The abstraction is retained for a future buildah-podman
+	// backend. Can also be set via PACK_BUILD_BACKEND environment variable.
 	BuildBackend string
 
 	// BuildkitBuilder specifies the name of the buildx builder to use for multi-platform builds.
@@ -204,25 +205,6 @@ type BuildOptions struct {
 
 	// BuildkitCacheTo specifies external cache destinations for buildkit.
 	BuildkitCacheTo []string
-
-	// BuildkitExportMode controls how per-arch images are exported from buildkit.
-	// Values: "registry" (default) — lifecycle pushes per-arch tags to registry;
-	//         "oci-layout" — lifecycle exports to OCI layout on disk, pack assembles and pushes atomically.
-	BuildkitExportMode string
-
-	// BuildkitOCILayoutDir is an optional user-supplied base directory for the
-	// per-arch OCI layout artifacts (oci-layout export mode only). When empty
-	// (default), pack uses a temporary directory that is removed after the build.
-	// When set, pack writes the artifacts under a unique per-build subdirectory
-	// of this path and does NOT clean them up — the caller owns cleanup. This is
-	// an opt-in debugging aid while the feature is experimental.
-	BuildkitOCILayoutDir string
-
-	// BuildkitOCILayoutDirClear, when true, clears BuildkitOCILayoutDir before the
-	// build starts so a persistent directory does not accumulate artifacts from
-	// prior builds. It requires BuildkitOCILayoutDir to be set and only applies in
-	// oci-layout export mode.
-	BuildkitOCILayoutDirClear bool
 
 	// Strategy for updating local images before a build.
 	PullPolicy image.PullPolicy
@@ -946,15 +928,6 @@ func (c *Client) buildMultiPlatform(ctx context.Context, opts BuildOptions, life
 	// Resolve docker config path for registry auth
 	dockerConfigPath := resolveDockerConfigPath()
 
-	// Resolve the optional user-supplied OCI layout output directory. When empty,
-	// ociLayoutOutputDir stays "" and the executor uses a temp dir it cleans up
-	// (the default). When set, artifacts are written under a unique per-build
-	// subdirectory and kept for debugging (the user owns cleanup).
-	ociLayoutOutputDir, err := c.resolveOCILayoutOutputDir(opts, buildID)
-	if err != nil {
-		return err
-	}
-
 	// Build the platform options (shared across all architectures)
 	platformBuildOpts := multiplatform.PlatformBuildOpts{
 		BuilderImage:     lifecycleOpts.BuilderImage,
@@ -976,8 +949,6 @@ func (c *Client) buildMultiPlatform(ctx context.Context, opts BuildOptions, life
 		OrderToml:        orderToml,
 		ClearCache:       opts.ClearCache,
 		RegistryAuth:     buildRegistryAuth(c.keychain, lifecycleOpts),
-		ExportMode:       multiplatform.ExportMode(opts.BuildkitExportMode),
-		OutputDir:        ociLayoutOutputDir,
 	}
 
 	// If the user explicitly passed --lifecycle-image, use it regardless of trust mode
@@ -1007,7 +978,6 @@ func (c *Client) buildMultiPlatform(ctx context.Context, opts BuildOptions, life
 		Logger:           c.logger,
 		ManifestListName: lifecycleOpts.Image.Name(),
 		Publish:          opts.Publish,
-		ExportMode:       multiplatform.ExportMode(opts.BuildkitExportMode),
 	}
 
 	results, err := executor.Execute(ctx, multiOpts)
@@ -1021,61 +991,6 @@ func (c *Client) buildMultiPlatform(ctx context.Context, opts BuildOptions, life
 	}
 
 	return nil
-}
-
-// resolveOCILayoutOutputDir validates the OCI-layout output-directory flags and,
-// when the user supplied a directory, returns a unique per-build subdirectory
-// under it for the per-arch OCI layout artifacts.
-//
-// Behavior:
-//   - No --buildkit-oci-layout-dir: returns "" so the executor uses a temporary
-//     directory it creates and removes after the build (the default).
-//   - --buildkit-oci-layout-dir <path>: returns "<path>/build-<buildID>", a unique
-//     per-build subdirectory so repeated builds never mix artifacts. The directory
-//     is kept after the build; the user owns cleanup. This opt-in aids debugging
-//     while the feature is experimental.
-//   - --buildkit-oci-layout-dir-clear (with the dir set): the base <path> is
-//     cleared before the build so a persistent directory does not accumulate
-//     artifacts from prior builds. The user explicitly asked for this wipe.
-//
-// The flags are only meaningful in oci-layout export mode; using them in any
-// other mode, or using -clear without -dir, is a validation error.
-func (c *Client) resolveOCILayoutOutputDir(opts BuildOptions, buildID string) (string, error) {
-	ociLayoutMode := multiplatform.ExportMode(opts.BuildkitExportMode) == multiplatform.ExportOCILayout
-
-	if opts.BuildkitOCILayoutDir == "" {
-		if opts.BuildkitOCILayoutDirClear {
-			return "", fmt.Errorf("--buildkit-oci-layout-dir-clear requires --buildkit-oci-layout-dir to be set")
-		}
-		// Default: executor uses and cleans up a temp dir.
-		return "", nil
-	}
-
-	if !ociLayoutMode {
-		return "", fmt.Errorf("--buildkit-oci-layout-dir is only valid with --buildkit-export-mode=oci-layout")
-	}
-
-	baseDir := opts.BuildkitOCILayoutDir
-
-	// -clear: wipe the user-supplied base directory before the build. The user
-	// explicitly requested this, so a full clear of the directory's contents is
-	// intended. The directory itself is recreated below.
-	if opts.BuildkitOCILayoutDirClear {
-		c.logger.Debugf("Clearing OCI layout output directory %s (--buildkit-oci-layout-dir-clear)", baseDir)
-		if err := os.RemoveAll(baseDir); err != nil {
-			return "", fmt.Errorf("clearing OCI layout output directory %s: %w", baseDir, err)
-		}
-	}
-
-	// Each build gets its own subdirectory so repeated builds into the same
-	// base directory never mix artifacts from multiple runs.
-	outputDir := filepath.Join(baseDir, fmt.Sprintf("build-%s", buildID))
-	if err := os.MkdirAll(outputDir, 0755); err != nil {
-		return "", fmt.Errorf("creating OCI layout output directory %s: %w", outputDir, err)
-	}
-
-	c.logger.Infof("OCI layout artifacts will be written to %s (kept after build; you are responsible for cleanup)", outputDir)
-	return outputDir, nil
 }
 
 // buildLifecyclePhases constructs the ordered list of lifecycle phase commands

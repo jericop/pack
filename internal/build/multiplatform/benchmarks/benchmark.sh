@@ -2,7 +2,7 @@
 #
 # BuildKit-native (Option A) multi-language benchmark harness.
 #
-# Drives the REAL pack binary with --build-backend buildkit-native against a
+# Drives the REAL pack binary with --build-backend buildkit against a
 # matrix of sample apps (python/poetry, nodejs/npm, java/maven, java/java-node,
 # ...) and, for each app, measures the WALL TIME (real elapsed seconds — see the
 # mvp-build-testing-strategy steering doc) of:
@@ -90,7 +90,7 @@ layer_count() {
   fi
 }
 
-# do_build runs one pack buildkit-native build of $app_path -> $image, teeing to
+# do_build runs one pack buildkit build of $app_path -> $image, teeing to
 # $logfile. Returns pack's exit code.
 do_build() {
   local image="$1" app_path="$2" logfile="$3"
@@ -102,7 +102,7 @@ do_build() {
     "${lc_args[@]}" \
     --run-image "$RUN_IMAGE" \
     --platforms "$PLATFORMS" \
-    --buildkit --build-backend buildkit-native \
+    --buildkit --build-backend buildkit \
     --buildkit-builder "$BUILDKIT_BUILDER" \
     --publish --trust-builder --verbose \
     >"$logfile" 2>&1

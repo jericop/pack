@@ -10,6 +10,22 @@ comparing an initial build vs a rebuild to observe caching behavior. We do NOT
 iterate through unit/integration test files for this — we use the CLI directly so
 we can read raw build output and timing.
 
+## When to run the FULL multi-language suite vs a single smoke build
+
+The full multi-language benchmark suite (python/poetry, nodejs/npm, java/maven,
+java/java-node, go/mod across multiple arches) is SLOW and is a FINAL verification
+step — run it once at the end, not while iterating.
+
+- **While iterating:** do NOT run the full suite. If a change needs a real build to
+  verify, run a SINGLE fast app on a SINGLE native arch, e.g.
+  `bash /tmp/run-benchmark-local.sh "go/mod" "linux/arm64" true`.
+- **Major changes only:** a single smoke build is warranted after a large/risky
+  change (e.g. deleting/rewriting many files, collapsing the backend, changing the
+  metadata label, changing lifecycle phase args). Prefer the single-app smoke build
+  over the full suite for this.
+- **Final step:** run the full multi-language, multi-arch suite once to produce the
+  duration/cache table before wrapping up or publishing.
+
 ## Test app
 
 Always use `samples/go/no-imports`:

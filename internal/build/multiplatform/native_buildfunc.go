@@ -32,7 +32,7 @@ import (
 //     build-metadata.json,
 //   - assembles FROM run-image by llb.Copy-ing each layer from its source (no tar
 //     extraction, no run-image shell/tar, no large materialization),
-//   - sets the image config + the io.buildpacks.buildkit.native.build-metadata
+//   - sets the image config + the io.buildpacks.lifecycle.prepared-metadata
 //     label via the gateway result (ExporterImageConfigKey),
 //   - returns per-platform refs so BuildKit exports ONE (multi-platform) image.
 //

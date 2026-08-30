@@ -8,20 +8,15 @@ import (
 )
 
 // NewBackend creates the appropriate BuildBackend based on the requested type.
-// Defaults to BackendBuildkitDockerfile. The LLB backend can be selected via --build-backend flag.
+// Today the only backend is BuildKit; "buildkit", "auto", and "" all resolve to
+// it. The switch is retained so a future backend (e.g. buildah-podman) can be
+// added without changing callers.
 func NewBackend(ctx context.Context, backendType BackendType, logger logging.Logger, buildkitOpts BuildkitOpts) (BuildBackend, error) {
 	switch backendType {
-	case BackendBuildkitDockerfile, BackendAuto, "":
-		return NewDockerfileBackend(logger, buildkitOpts), nil
-
-	case BackendBuildkitLLB:
-		return NewLLBBackend(logger, buildkitOpts), nil
-
-	case BackendBuildkitNative:
-		return NewNativeBackend(logger, buildkitOpts), nil
+	case BackendBuildkit, BackendAuto, "":
+		return NewBuildkitBackend(logger, buildkitOpts), nil
 
 	default:
-		return nil, fmt.Errorf("unknown build backend %q; valid options: %s, %s, %s",
-			backendType, BackendBuildkitDockerfile, BackendBuildkitLLB, BackendBuildkitNative)
+		return nil, fmt.Errorf("unknown build backend %q; valid options: %s", backendType, BackendBuildkit)
 	}
 }
