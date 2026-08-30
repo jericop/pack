@@ -6,7 +6,8 @@ name: benchmark (perf matrix)
 #
 # Matrix = app  ×  build-type, where build-type is one of:
 #   * docker-daemon-single : standard pack build (docker-daemon backend), single
-#                            host-native platform, built to the local daemon.
+#                            host-native platform, published (same work as
+#                            buildkit-single, for a fair backend comparison).
 #   * buildkit-single      : native buildkit backend, single host-native platform,
 #                            published.
 #   * buildkit-multi       : native buildkit backend, multi-arch
@@ -175,8 +176,8 @@ jobs:
           fi
           case "${{ matrix.build_type }}" in
             docker-daemon-single)
-              img="cmp-${{ matrix.app.id }}-${{ github.run_id }}:latest"
-              common="--path $app_path --builder $BUILDER --run-image $RUN_IMAGE --platform $HOST_PLATFORM --trust-builder"
+              img="${{ secrets.DOCKERHUB_ORG }}/bench-daemon-single-${{ matrix.app.id }}-${{ github.run_id }}:latest"
+              common="--path $app_path --builder $BUILDER --run-image $RUN_IMAGE --platform $HOST_PLATFORM --publish --trust-builder"
               ;;
             buildkit-single)
               img="${{ secrets.DOCKERHUB_ORG }}/bench-bk-single-${{ matrix.app.id }}-${{ github.run_id }}:latest"
@@ -207,10 +208,9 @@ jobs:
           e=$(date +%s.%N)
           echo "seconds=$(awk -v s=$s -v e=$e 'BEGIN{printf "%.2f", e-s}')" >> "$GITHUB_OUTPUT"
 
-      # Rebase only applies to the published buildkit images.
+      # All three build types now publish, so all produce a rebaseable image.
       - name: "rebase"
         id: rebase
-        if: ${{ matrix.build_type != 'docker-daemon-single' }}
         run: |
           s=$(date +%s.%N)
           "${GITHUB_WORKSPACE}/pack-bin" rebase "${{ steps.cmd.outputs.img }}" \
@@ -252,7 +252,7 @@ jobs:
             echo
             echo "Each cell built on its own clean runner (cold cache). Builder: \`${BUILDER}\`."
             echo "Run image: \`${RUN_IMAGE}\`. single = host-native (\`${HOST_PLATFORM}\`); multi = \`${MULTI_PLATFORMS}\`."
-            echo "Durations are wall-clock seconds; rebase is n/a for docker-daemon."
+            echo "Durations are wall-clock seconds. All build types publish."
             echo
             echo "| App | Build type | Cold (s) | Rebuild (s) | Rebase (s) |"
             echo "|-----|------------|---------:|------------:|-----------:|"
