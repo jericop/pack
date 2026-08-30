@@ -1,11 +1,18 @@
-# BuildKit Multi-Architecture Build Support for Pack
+# BuildKit Multi-Architecture Build Backend for Pack
+
+Quick-reference technical guide for this fork's BuildKit build backend. (This is a
+local mirror of the design captured in the RFC at
+`jericop/cnb-rfcs` `text/0000-buildkit-multiarch-build.md`; kept at the repo root so
+it is easy to find.)
 
 ## Overview
 
-This package adds multi-architecture container image building to `pack` using
+This fork adds multi-architecture container image building to `pack` using
 BuildKit. Instead of running lifecycle phases as individual Docker containers
-(pack's default approach), it runs the lifecycle inside BuildKit and produces one
-multi-arch app image (an OCI index) via QEMU emulation and/or native runners.
+(pack's default `docker-daemon` backend), the `buildkit` backend runs the lifecycle
+inside BuildKit and produces one multi-arch app image (an OCI index) via QEMU
+emulation and/or native runners. The implementation lives in
+`internal/build/multiplatform/`.
 
 The `buildkit-native-export` branch is dedicated to a SINGLE builder-agnostic
 build backend named `buildkit` (build-then-finalize). Earlier proof-of-concept
@@ -16,12 +23,11 @@ can be added without reworking the abstraction. (The backend is named `buildah`;
 podman is the sibling container tool in the same ecosystem, but the build library
 is buildah.)
 
-> The canonical summary of this feature lives in the `buildkit-multiarch` steering
-> file (`.kiro/steering/buildkit-multiarch.md`); it is the source of truth. This
-> file is the expanded technical reference and is kept in sync with it. For a
-> hands-on user walkthrough (consume the published images, build a multi-arch app,
-> make your own builder, run it in CI), see
-> [TRY-IT-OUT.md](./TRY-IT-OUT.md).
+> The canonical internal summary lives in the `buildkit-multiarch` steering file
+> (`.kiro/steering/buildkit-multiarch.md`). This root-level doc is the expanded
+> technical reference. For a hands-on user walkthrough (consume the published
+> images, build a multi-arch app, make your own builder, run it in CI), see
+> [internal/build/multiplatform/TRY-IT-OUT.md](./internal/build/multiplatform/TRY-IT-OUT.md).
 
 ## How It Works: build-then-finalize
 
@@ -81,7 +87,7 @@ pack build registry.example.com/myapp:latest \
   --path ./app \
   --builder jericop/ubuntu-noble-builder:buildkit-native-export \
   --run-image paketobuildpacks/ubuntu-noble-run:latest \
-  --platforms linux/amd64,linux/arm64 \
+  --platform linux/amd64 --platform linux/arm64 \
   --build-backend buildkit \
   --buildkit-builder pack-multiplatform \
   --publish --trust-builder
@@ -99,7 +105,7 @@ emit/finalize-capable lifecycle, pass `--lifecycle-image` to supply one.
 pack build registry.example.com/myapp:latest \
   --path ./app \
   --builder jericop/ubuntu-noble-builder:buildkit-native-export \
-  --platforms linux/amd64,linux/arm64 \
+  --platform linux/amd64 --platform linux/arm64 \
   --build-backend buildkit \
   --buildkit-builder pack-multiplatform \
   --buildkit-cache-from type=registry,ref=registry.example.com/myapp-cache:latest \
@@ -145,8 +151,8 @@ host-side finalize step reuses the same pack-resolved credentials.
 
 | Flag | Description |
 |------|-------------|
-| `--build-backend` | [experimental] Selects the native build engine AND opts into the native (multi-arch, build-then-finalize) path by being set. `auto` or `buildkit` (both resolve to BuildKit today; `buildah` planned). Empty (default) = standard single-arch build. There is no separate `--buildkit` toggle. |
-| `--platforms` | Comma-separated target platforms (e.g. `linux/amd64,linux/arm64`); requires `--build-backend` |
+| `--build-backend` | Build backend. `docker-daemon` (default; standard single-arch daemon build), `buildkit` (native multi-arch, experimental), or `auto` (resolves to `docker-daemon`). `buildah` planned. |
+| `--platform` | Target platform; repeatable (or comma-separated), e.g. `--platform linux/amd64 --platform linux/arm64`. `docker-daemon` accepts one; `buildkit` accepts many. Defaults to the host platform when omitted. |
 | `--buildkit-builder` | Name of the buildx (docker-container) builder |
 | `--buildkit-cache-from` | External registry cache source (`type=registry,ref=...`) |
 | `--buildkit-cache-to` | External registry cache destination (`type=registry,ref=...,mode=max`) |

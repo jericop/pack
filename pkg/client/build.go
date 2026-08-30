@@ -13,6 +13,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
@@ -175,21 +176,17 @@ type BuildOptions struct {
 	// Process type that will be used when setting container start command.
 	DefaultProcessType string
 
-	// Platform is the desired platform to build on (e.g., linux/amd64)
-	Platform string
+	// Platforms is the list of target platforms to build for (e.g.
+	// ["linux/amd64"] or ["linux/amd64","linux/arm64"]). The default docker-daemon
+	// backend accepts a single platform; the buildkit backend accepts many and
+	// assembles them into one multi-arch image. When empty, the build defaults to
+	// the host platform.
+	Platforms []string
 
-	// Platforms specifies multiple target platforms for multi-architecture builds
-	// (e.g., "linux/amd64,linux/arm64"). When set, the build uses the native backend
-	// to produce per-architecture images and assembles them into a manifest list.
-	// Requires BuildBackend to be set. Requires --publish or an output directory.
-	// Mutually exclusive with Platform.
-	Platforms string
-
-	// BuildBackend selects the native build backend and, by being set, opts into the
-	// native (multi-platform, build-then-finalize) build path. An empty value uses
-	// the standard single-arch build. Valid values: "auto" and "buildkit"; both
-	// resolve to the BuildKit backend today. The abstraction is retained for a
-	// future buildah backend. This is an experimental feature.
+	// BuildBackend selects the build backend. "" and "auto" resolve to
+	// "docker-daemon" (the standard single-arch daemon build). "buildkit" is the
+	// native multi-architecture backend (experimental). The abstraction is
+	// retained for a future buildah backend.
 	BuildBackend string
 
 	// BuildkitBuilder specifies the name of the buildx builder to use for multi-platform builds.
@@ -379,11 +376,15 @@ func (c *Client) Build(ctx context.Context, opts BuildOptions) error {
 		return errors.Wrapf(err, "invalid builder '%s'", opts.Builder)
 	}
 
+	// The daemon (single-arch) path derives its target from the first requested
+	// platform, if any. When no platform is requested it stays nil, and the
+	// builder fetch resolves to the daemon's host platform (host-native, as the
+	// standard build has always behaved).
 	requestedTarget := func() *dist.Target {
-		if opts.Platform == "" {
+		if len(opts.Platforms) == 0 {
 			return nil
 		}
-		parts := strings.Split(opts.Platform, "/")
+		parts := strings.Split(opts.Platforms[0], "/")
 		switch len(parts) {
 		case 0:
 			return nil
@@ -862,26 +863,21 @@ func (c *Client) Build(ctx context.Context, opts BuildOptions) error {
 
 	// Native build routing: setting BuildBackend opts into the native (multi-platform,
 	// build-then-finalize) path. --platforms requires BuildBackend to be set.
-	if opts.BuildBackend != "" {
-		if opts.Platforms == "" {
-			// Single-platform native build — use the current platform
-			opts.Platforms = opts.Platform
-			if opts.Platforms == "" {
-				// Default to the builder's platform
-				if targetToUse != nil {
-					opts.Platforms = targetToUse.OS + "/" + targetToUse.Arch
-				} else {
-					opts.Platforms = "linux/amd64"
-				}
-			}
+	// Route by backend. "" and "auto" resolve to docker-daemon (the standard
+	// single-arch daemon build); "buildkit" is the native multi-arch path.
+	backend := multiplatform.BackendType(opts.BuildBackend).Resolve()
+	if backend == multiplatform.BackendBuildkit {
+		if len(opts.Platforms) == 0 {
+			// No platform requested: default to the HOST platform so the build is
+			// native (no emulation), matching the standard daemon build. We do NOT
+			// fall back to the builder image's default arch here.
+			opts.Platforms = []string{runtime.GOOS + "/" + runtime.GOARCH}
 		}
 		return c.buildMultiPlatform(ctx, opts, lifecycleOpts, appPath, runImageName)
 	}
 
-	if opts.Platforms != "" {
-		return fmt.Errorf("--platforms requires --build-backend to be set (experimental feature)")
-	}
-
+	// docker-daemon backend: standard container-based build against the daemon.
+	// The per-command validation already enforces a single platform for it.
 	if err = c.lifecycleExecutor.Execute(ctx, lifecycleOpts); err != nil {
 		return fmt.Errorf("executing lifecycle: %w", err)
 	}
@@ -892,7 +888,7 @@ func (c *Client) Build(ctx context.Context, opts BuildOptions) error {
 // It constructs lifecycle phase commands, selects the appropriate backend,
 // and dispatches the build to the multi-platform executor.
 func (c *Client) buildMultiPlatform(ctx context.Context, opts BuildOptions, lifecycleOpts build.LifecycleOptions, appPath string, runImageName string) error {
-	platforms, err := multiplatform.ParsePlatforms(opts.Platforms)
+	platforms, err := multiplatform.ParsePlatformList(opts.Platforms)
 	if err != nil {
 		return fmt.Errorf("parsing platforms: %w", err)
 	}

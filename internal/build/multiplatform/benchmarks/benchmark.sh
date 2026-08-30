@@ -96,6 +96,16 @@ do_build() {
   local image="$1" app_path="$2" logfile="$3"
   local lc_args=()
   [ -n "$LIFECYCLE_IMAGE" ] && lc_args=(--lifecycle-image "$LIFECYCLE_IMAGE")
+  # Build a repeatable --platform arg list from the comma-separated PLATFORMS env
+  # (the flag is now repeatable: --platform linux/amd64 --platform linux/arm64).
+  local platform_args=()
+  local _p
+  local _oldifs="$IFS"; IFS=','
+  for _p in $PLATFORMS; do
+    _p="$(echo "$_p" | tr -d '[:space:]')"
+    [ -n "$_p" ] && platform_args+=(--platform "$_p")
+  done
+  IFS="$_oldifs"
   # ${lc_args[@]+"${lc_args[@]}"} is the set -u-safe way to expand a possibly-empty
   # array (when LIFECYCLE_IMAGE is unset, lc_args is empty and must not error).
   "$PACK_BIN" build "$image" \
@@ -103,8 +113,8 @@ do_build() {
     --builder "$BUILDER" \
     ${lc_args[@]+"${lc_args[@]}"} \
     --run-image "$RUN_IMAGE" \
-    --platforms "$PLATFORMS" \
-    --buildkit --build-backend buildkit \
+    ${platform_args[@]+"${platform_args[@]}"} \
+    --build-backend buildkit \
     --buildkit-builder "$BUILDKIT_BUILDER" \
     --publish --trust-builder --verbose \
     >"$logfile" 2>&1

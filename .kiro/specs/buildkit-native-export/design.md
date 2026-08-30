@@ -7,9 +7,28 @@ natively, then runs a lifecycle-owned FINALIZE step that authors the correct CNB
 metadata on the pushed image from its ACTUAL produced layers. No custom BuildKit
 gateway frontend, no per-layer re-extraction, no post-push layer changes.
 
-Experimental, opt-in: `--build-backend=buildkit` (the only implemented backend
-value; `auto` resolves to it). The `BuildBackend` interface / `BackendType` enum /
-factory / `--build-backend` flag are retained for a future `buildah` backend.
+Experimental, opt-in: `--build-backend buildkit`. The build backend is now a
+first-class, capability-driven concept:
+
+- **`docker-daemon`** is an official `BackendType` and the DEFAULT (`""` and
+  `auto` resolve to it). It is the standard single-arch container build against the
+  local Docker daemon; A-lite routing keeps its execution on the existing daemon
+  lifecycle executor (it is not a `BuildBackend.Build` implementation).
+- **`buildkit`** is the native build-then-finalize backend described here.
+- **`buildah`** is planned; adding it is a new `--build-backend` value, not a new
+  flag.
+
+Platform selection is unified under a single repeatable `--platform` flag (the old
+separate `--platforms` was removed). How many platforms a build may specify is a
+backend CAPABILITY, not a per-backend CLI branch: `BackendCapabilities.MaxPlatforms`
+is `1` for `docker-daemon` (single-arch) and `0` (unlimited) for `buildkit`. The CLI
+resolves the backend, then rejects more `--platform` values than the backend allows.
+When no `--platform` is given, the build defaults to the HOST platform
+(`runtime.GOOS/GOARCH`) for both backends — the buildkit backend no longer defaults
+to the builder image's arch (which could force emulation on a non-amd64 host).
+
+The `BuildBackend` interface / `BackendType` enum / factory / `--build-backend` flag
+are retained for the future `buildah` backend.
 
 > NOTE (as-implemented): this spec was written during the spike. The backend value
 > is `buildkit` (was `buildkit-native`); the build-phase label is
@@ -44,7 +63,7 @@ for the full decision record and rejected alternatives. Sections below marked
 ## Architecture
 
 ```
-pack build --build-backend buildkit-native --platforms ... --publish
+pack build --build-backend buildkit --platform linux/amd64 --platform linux/arm64 --publish
         │
         ▼  (host)
 ┌──────────────────────────────────────────────────────────────┐

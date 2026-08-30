@@ -11,9 +11,9 @@ This workspace contains a proof-of-concept implementation of BuildKit-based mult
 The `buildkit-native-export` branch is dedicated to a SINGLE builder-agnostic build backend called `buildkit`. Earlier proof-of-concept backends (`buildkit-dockerfile`, `buildkit-llb`) and the OCI-layout export mode have been removed. The `BuildBackend` interface, `BackendType` enum, factory, and `--build-backend` flag are intentionally KEPT so a future `buildah` backend can be added without reworking the abstraction. (Backend named `buildah`; podman is the sibling container tool, but the build library is buildah.)
 
 > Source of truth: this steering file is the canonical summary of the BuildKit
-> multi-arch feature. The comprehensive doc at
-> `internal/build/multiplatform/buildkit-multi-arch-readme.md` is kept in sync with
-> it — update this file first, then propagate changes to the readme.
+> multi-arch feature. The comprehensive doc at the repo root
+> `BUILDKIT-BACKEND.md` is kept in sync with it — update this file first, then
+> propagate changes to the root doc.
 
 ## Key Architecture Decisions
 
@@ -50,7 +50,7 @@ internal/build/multiplatform/
 ├── backend_native.go             # BuildkitBackend: drives the BuildKit build+push, then calls the lifecycle finalize.Finalize library post-push
 ├── buildkit_client.go            # Shared BuildKit helpers (connect, resolve addr, progress display, cache import/export parsing, docker auth provider)
 ├── native_buildfunc.go           # In-process gateway BuildFunc: assembles FROM run-image via llb.Copy of each emitted CNB layer source
-├── buildkit-multi-arch-readme.md # Comprehensive documentation
+│                                  # (comprehensive doc moved to repo-root BUILDKIT-BACKEND.md)
 ├── metadata_rewrite.go           # Test-env applyHostRegistryRemap shim only (the rewrite logic moved to the lifecycle phase/finalize library)
 ├── emit_contract.go              # Parser for the lifecycle emit contract (plan.json/config.json)
 ├── executor.go                   # MultiPlatformExecutor orchestration (skips own assembly when the backend PushesNatively)
@@ -63,8 +63,8 @@ The Dockerfile backend, LLB backend, Dockerfile generator, and all `oci_layout_*
 
 | Flag | Description |
 |------|-------------|
-| `--build-backend` | [experimental] Opts into the native path (by being set) AND selects the engine: `auto` or `buildkit` (both BuildKit today; `buildah` planned). No separate `--buildkit` toggle |
-| `--platforms` | Comma-separated platforms (e.g., `linux/amd64,linux/arm64`); requires `--build-backend` |
+| `--build-backend` | Backend: `docker-daemon` (default; standard single-arch daemon build), `buildkit` (native multi-arch, experimental), or `auto` (→ `docker-daemon`). `buildah` planned |
+| `--platform` | Target platform; repeatable or comma-separated (e.g., `--platform linux/amd64 --platform linux/arm64`). `docker-daemon` accepts one; `buildkit` accepts many. Defaults to the host platform |
 | `--buildkit-builder` | Name of the buildx (docker-container) builder |
 | `--buildkit-cache-from` | Registry cache source (`type=registry,ref=...`) |
 | `--buildkit-cache-to` | Registry cache destination (`type=registry,ref=...,mode=max`) |
@@ -91,7 +91,7 @@ pack build pack-local-registry:5000/myapp:latest \
   --path ./app \
   --builder jericop/ubuntu-noble-builder:buildkit-native-export \
   --run-image paketobuildpacks/ubuntu-noble-run:latest \
-  --platforms linux/amd64,linux/arm64 \
+  --platform linux/amd64 --platform linux/arm64 \
   --build-backend buildkit \
   --buildkit-builder pack-multiplatform \
   --publish --trust-builder

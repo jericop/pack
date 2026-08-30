@@ -1170,7 +1170,7 @@ func EqBuildOptionsWithPlatform(platform string) gomock.Matcher {
 	return buildOptionsMatcher{
 		description: fmt.Sprintf("Platform=%s", platform),
 		equals: func(o client.BuildOptions) bool {
-			return o.Platform == platform
+			return len(o.Platforms) == 1 && o.Platforms[0] == platform
 		},
 	}
 }

@@ -1,0 +1,133 @@
+name: Backend comparison benchmark
+
+# Single-arch comparison of the standard docker-daemon build vs the native buildkit
+# backend, across the sample-app matrix, on identical footing (same pack binary,
+# builder, run image; host platform; both --publish). Produces a Markdown/CSV table
+# artifact used by the RFC's performance comparison.
+#
+# The `pack` binary source is parameterized like buildkit-build.yml:
+#   * DEFAULT: build pack from source at pack_ref.
+#   * OPTIONAL: if pack_image is set, pull it and copy the pack binary out.
+
+on:
+  workflow_dispatch:
+    inputs:
+      pack_image:
+        description: >-
+          Optional: pull `pack` from this image and copy the binary out instead of
+          building from source (e.g. jericop/pack:buildkit-native-export-v0.1.0).
+        required: false
+        default: ""
+      pack_ref:
+        description: "pack fork git ref to build from when pack_image is empty"
+        required: false
+        default: "buildkit-native-export"
+      builder:
+        description: "Builder image used for BOTH backends"
+        required: false
+        default: "jericop/ubuntu-noble-builder:buildkit-native-export"
+      run_image:
+        description: "Run image"
+        required: false
+        default: "paketobuildpacks/ubuntu-noble-run:latest"
+      apps:
+        description: "Space-separated lang/app list"
+        required: false
+        default: "python/poetry nodejs/npm java/maven java/java-node go/mod"
+      samples_repo:
+        description: "Samples repo to checkout (org/name)"
+        required: false
+        default: "buildpacks/samples"
+
+env:
+  PACK_IMAGE: ${{ github.event.inputs.pack_image || '' }}
+  PACK_REF: ${{ github.event.inputs.pack_ref || 'buildkit-native-export' }}
+  BUILDER: ${{ github.event.inputs.builder || 'jericop/ubuntu-noble-builder:buildkit-native-export' }}
+  RUN_IMAGE: ${{ github.event.inputs.run_image || 'paketobuildpacks/ubuntu-noble-run:latest' }}
+  BENCH_APPS: ${{ github.event.inputs.apps || 'python/poetry nodejs/npm java/maven java/java-node go/mod' }}
+  SAMPLES_REPO: ${{ github.event.inputs.samples_repo || 'buildpacks/samples' }}
+
+jobs:
+  compare:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout pack (for the comparison harness)
+        uses: actions/checkout@v5
+        with:
+          path: pack-repo
+
+      - name: Checkout samples
+        uses: actions/checkout@v5
+        with:
+          repository: ${{ env.SAMPLES_REPO }}
+          path: samples
+
+      # --- pack binary: build-from-source (default) OR copy-out-of-image ---
+      - name: Checkout pack source
+        if: ${{ env.PACK_IMAGE == '' }}
+        uses: actions/checkout@v5
+        with:
+          repository: jericop/pack
+          ref: ${{ env.PACK_REF }}
+          path: pack-src
+
+      - name: Set up Go
+        if: ${{ env.PACK_IMAGE == '' }}
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: pack-src/go.mod
+
+      - name: Build pack from source
+        if: ${{ env.PACK_IMAGE == '' }}
+        run: |
+          cd pack-src
+          go build -o "${GITHUB_WORKSPACE}/pack-bin" .
+
+      - name: Copy pack binary out of published image
+        if: ${{ env.PACK_IMAGE != '' }}
+        run: |
+          docker pull "${PACK_IMAGE}"
+          cid="$(docker create "${PACK_IMAGE}")"
+          docker cp "${cid}:/usr/local/bin/pack" "${GITHUB_WORKSPACE}/pack-bin"
+          docker rm "${cid}" >/dev/null
+
+      - name: pack version + experimental
+        run: |
+          chmod +x "${GITHUB_WORKSPACE}/pack-bin"
+          "${GITHUB_WORKSPACE}/pack-bin" version
+          "${GITHUB_WORKSPACE}/pack-bin" config experimental true
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Create buildx builder
+        run: docker buildx create --name pack-multiplatform --driver docker-container --bootstrap --use
+
+      - name: Login to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKER_USERNAME }}
+          password: ${{ secrets.DOCKER_PASSWORD }}
+
+      - name: Run comparison benchmark
+        env:
+          PACK_BIN: ${{ github.workspace }}/pack-bin
+          SAMPLES_DIR: ${{ github.workspace }}/samples
+          OUT_DIR: ${{ github.workspace }}/compare-out
+          # Both backends publish to Docker Hub, which resolves identically from the
+          # runner daemon (docker-daemon backend) and the docker-container buildx
+          # builder (buildkit backend) — no localhost/container-name split, so no
+          # PACK_HOST_REGISTRY_REMAP is needed. Per-app images are pushed under the
+          # DOCKERHUB_ORG namespace as benchmark artifacts.
+          REGISTRY_PUSH: ${{ secrets.DOCKERHUB_ORG }}
+          REGISTRY_HOST: ${{ secrets.DOCKERHUB_ORG }}
+          BUILDKIT_BUILDER: pack-multiplatform
+        run: |
+          bash pack-repo/internal/build/multiplatform/benchmarks/compare-backends.sh
+
+      - name: Upload comparison table + logs
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: compare-backends-results
+          path: ${{ github.workspace }}/compare-out

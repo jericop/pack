@@ -16,16 +16,26 @@ import (
 type BackendType string
 
 const (
+	// BackendDockerDaemon is the standard pack build path: the lifecycle runs in
+	// containers against the local Docker daemon, producing a single-architecture
+	// image. It is the DEFAULT backend (and what "auto" resolves to). It is an
+	// official backend value so that every build flows through the same
+	// backend+capabilities model, even though its execution is still routed
+	// through the existing daemon lifecycle executor (not BuildBackend.Build) for
+	// now.
+	BackendDockerDaemon BackendType = "docker-daemon"
+
 	// BackendBuildkit uses the BuildKit Go SDK to run detector + builder +
 	// the lifecycle's prepare-image-metadata mode as RUN steps (producing the
 	// metadata contract inside BuildKit), then assembles the final CNB app image
 	// natively in BuildKit (FROM run-image + add the produced layers + apply the
 	// prepared config) and exports it via BuildKit's native multi-platform image
-	// export. No layer-data egress to the host. This is the sole backend today;
-	// the abstraction is retained for a future buildah backend.
+	// export. No layer-data egress to the host. This is the sole native backend
+	// today; the abstraction is retained for a future buildah backend.
 	BackendBuildkit BackendType = "buildkit"
 
-	// BackendAuto auto-detects the best available backend (currently buildkit).
+	// BackendAuto auto-detects the best available backend (resolves to
+	// docker-daemon, the standard single-arch path).
 	BackendAuto BackendType = "auto"
 )
 
@@ -60,17 +70,26 @@ func ParsePlatform(s string) (Platform, error) {
 
 // ParsePlatforms parses a comma-separated list of platforms.
 func ParsePlatforms(s string) ([]Platform, error) {
+	return ParsePlatformList(strings.Split(s, ","))
+}
+
+// ParsePlatformList parses a slice of platform strings (each entry may itself be
+// comma-separated). It is the []string counterpart of ParsePlatforms, used by the
+// repeatable --platform flag.
+func ParsePlatformList(in []string) ([]Platform, error) {
 	var platforms []Platform
-	for _, p := range strings.Split(s, ",") {
-		p = strings.TrimSpace(p)
-		if p == "" {
-			continue
+	for _, item := range in {
+		for _, p := range strings.Split(item, ",") {
+			p = strings.TrimSpace(p)
+			if p == "" {
+				continue
+			}
+			platform, err := ParsePlatform(p)
+			if err != nil {
+				return nil, err
+			}
+			platforms = append(platforms, platform)
 		}
-		platform, err := ParsePlatform(p)
-		if err != nil {
-			return nil, err
-		}
-		platforms = append(platforms, platform)
 	}
 	if len(platforms) == 0 {
 		return nil, fmt.Errorf("no platforms specified")
@@ -191,6 +210,13 @@ type PlatformBuildResult struct {
 
 // BackendCapabilities describes what a build backend supports.
 type BackendCapabilities struct {
+	// MaxPlatforms is the number of target platforms the backend accepts in a
+	// single build. 1 means single-architecture only (docker-daemon). 0 means
+	// unlimited — the backend can build any number of platforms in one invocation
+	// (buildkit). The CLI uses this to validate the number of --platform values,
+	// so the rule lives with the backend rather than in per-backend CLI branches.
+	MaxPlatforms int
+
 	// SupportsCacheMounts indicates the backend supports persistent cache mounts.
 	SupportsCacheMounts bool
 
@@ -206,6 +232,39 @@ type BackendCapabilities struct {
 	// (multi-platform) image via BuildKit's native image exporter — one
 	// image/index, no intermediate tags.
 	PushesNatively bool
+}
+
+// Capabilities returns the declared capabilities for a backend type without
+// constructing it. This lets the CLI validate platform counts (and resolve
+// "auto") using the same single source of truth the backends report. "auto"
+// resolves to docker-daemon.
+func (t BackendType) Capabilities() BackendCapabilities {
+	switch t {
+	case BackendBuildkit:
+		return BackendCapabilities{
+			MaxPlatforms:         0, // unlimited
+			SupportsCacheMounts:  true,
+			SupportsParallelArch: true,
+			SupportsSecretMounts: true,
+			PushesNatively:       true,
+		}
+	case BackendDockerDaemon, BackendAuto, "":
+		return BackendCapabilities{
+			MaxPlatforms:   1, // single-arch only
+			PushesNatively: false,
+		}
+	default:
+		// Unknown backend: be permissive on count (the factory will reject it).
+		return BackendCapabilities{MaxPlatforms: 0}
+	}
+}
+
+// Resolve maps "" and "auto" to the concrete default backend (docker-daemon).
+func (t BackendType) Resolve() BackendType {
+	if t == "" || t == BackendAuto {
+		return BackendDockerDaemon
+	}
+	return t
 }
 
 // BuildBackend is the interface that all multi-platform build backends must implement.

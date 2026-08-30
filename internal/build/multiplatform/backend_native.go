@@ -51,6 +51,7 @@ func (b *BuildkitBackend) Name() string {
 
 func (b *BuildkitBackend) Capabilities() BackendCapabilities {
 	return BackendCapabilities{
+		MaxPlatforms:         0, // unlimited: builds any number of platforms in one invocation
 		SupportsCacheMounts:  true,
 		SupportsParallelArch: true,
 		SupportsSecretMounts: true,

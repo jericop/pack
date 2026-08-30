@@ -43,8 +43,7 @@ type BuildFlags struct {
 	ExecutionEnv              string
 	Registry                  string
 	RunImage                  string
-	Platform                  string
-	Platforms                 string
+	Platforms                 []string
 	BuildBackend              string
 	BuildkitBuilder           string
 	BuildkitCacheFrom         []string
@@ -204,7 +203,6 @@ func Build(logger logging.Logger, cfg config.Config, packClient PackClient) *cob
 				Image:                     inputImageName.Name(),
 				Publish:                   flags.Publish,
 				DockerHost:                flags.DockerHost,
-				Platform:                  flags.Platform,
 				Platforms:                 flags.Platforms,
 				BuildBackend:              flags.BuildBackend,
 				BuildkitBuilder:           flags.BuildkitBuilder,
@@ -309,9 +307,8 @@ Special value 'inherit' may be used in which case DOCKER_HOST environment variab
 This option may set DOCKER_HOST environment variable for the build container if needed.
 `)
 	cmd.Flags().StringVar(&buildFlags.LifecycleImage, "lifecycle-image", cfg.LifecycleImage, `Custom lifecycle image to use for analysis, restore, and export when builder is untrusted.`)
-	cmd.Flags().StringVar(&buildFlags.Platform, "platform", "", `Platform to build on (e.g., "linux/amd64").`)
-	cmd.Flags().StringVar(&buildFlags.Platforms, "platforms", "", `Comma-separated list of target platforms for multi-architecture builds (e.g., "linux/amd64,linux/arm64"). Requires --build-backend. Requires --publish or produces local OCI layouts.`)
-	cmd.Flags().StringVar(&buildFlags.BuildBackend, "build-backend", "", `[experimental] Build backend for native (multi-architecture) builds. Setting this opts into the native build path. Values: "auto" or "buildkit" (both use the BuildKit backend today; "buildah" is planned). Empty (default) uses the standard single-arch build.`)
+	cmd.Flags().StringArrayVar(&buildFlags.Platforms, "platform", nil, `Target platform to build for (e.g., "linux/amd64"). May be repeated (or comma-separated) to build multiple platforms in one image, e.g. --platform linux/amd64 --platform linux/arm64. The default (docker-daemon) backend accepts a single platform; --build-backend buildkit accepts many. Defaults to the host platform when omitted.`)
+	cmd.Flags().StringVar(&buildFlags.BuildBackend, "build-backend", "", `[experimental] Build backend. "docker-daemon" (default; standard single-arch build against the local Docker daemon), "buildkit" (native multi-architecture build), or "auto" (resolves to docker-daemon). "buildah" is planned.`)
 	cmd.Flags().StringVar(&buildFlags.BuildkitBuilder, "buildkit-builder", "", `Name of the buildx builder to use for multi-platform builds (default: current buildx default).`)
 	cmd.Flags().StringArrayVar(&buildFlags.BuildkitCacheFrom, "buildkit-cache-from", nil, `External cache source for buildkit (e.g., "type=registry,ref=myapp-cache:latest").`)
 	cmd.Flags().StringArrayVar(&buildFlags.BuildkitCacheTo, "buildkit-cache-to", nil, `External cache destination for buildkit (e.g., "type=registry,ref=myapp-cache:latest,mode=max").`)
@@ -336,7 +333,6 @@ This option may set DOCKER_HOST environment variable for the build container if 
 	if !cfg.Experimental {
 		cmd.Flags().MarkHidden("interactive")
 		cmd.Flags().MarkHidden("sparse")
-		cmd.Flags().MarkHidden("platforms")
 		cmd.Flags().MarkHidden("build-backend")
 		cmd.Flags().MarkHidden("buildkit-builder")
 		cmd.Flags().MarkHidden("buildkit-cache-from")
@@ -394,19 +390,43 @@ func validateBuildFlags(flags *BuildFlags, cfg config.Config, inputImageRef clie
 		}
 	}
 
-	if flags.Platforms != "" && flags.Platform != "" {
-		return errors.New("--platforms and --platform are mutually exclusive; use --platforms for multi-architecture builds")
-	}
+	// Normalize --platform (repeatable, comma-split friendly) in place so the rest
+	// of the pipeline sees a clean list.
+	flags.Platforms = splitPlatforms(flags.Platforms)
 
-	if flags.Platforms != "" && flags.BuildBackend == "" {
-		return errors.New("--platforms requires --build-backend (e.g. --build-backend buildkit)")
-	}
-
-	if flags.BuildBackend != "" && !cfg.Experimental {
+	// Selecting a native backend (currently only buildkit) is experimental.
+	backend := multiplatform.BackendType(flags.BuildBackend).Resolve()
+	if backend != multiplatform.BackendDockerDaemon && !cfg.Experimental {
 		return client.NewExperimentError("Native (multi-platform) builds are currently experimental. Run 'pack config experimental true' to enable.")
 	}
 
+	// The number of target platforms a build may specify is a property of the
+	// backend (its capabilities), not a per-backend CLI branch. MaxPlatforms == 1
+	// means single-arch only; 0 means unlimited.
+	caps := backend.Capabilities()
+	if caps.MaxPlatforms == 1 && len(flags.Platforms) > 1 {
+		return errors.Errorf("the %s backend supports a single --platform; use --build-backend buildkit to build multiple platforms in one image", backend)
+	}
+
 	return nil
+}
+
+// splitPlatforms flattens a repeatable --platform flag (each value may itself be
+// a comma-separated list) into a de-duplicated, trimmed slice, preserving order.
+func splitPlatforms(in []string) []string {
+	var out []string
+	seen := map[string]bool{}
+	for _, item := range in {
+		for _, p := range strings.Split(item, ",") {
+			p = strings.TrimSpace(p)
+			if p == "" || seen[p] {
+				continue
+			}
+			seen[p] = true
+			out = append(out, p)
+		}
+	}
+	return out
 }
 
 func parseEnv(envFiles []string, envVars []string) (map[string]string, error) {

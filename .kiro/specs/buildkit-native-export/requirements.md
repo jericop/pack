@@ -64,6 +64,15 @@ host-side metadata-SHA rewrite as a pack-owned workaround.
 > (implemented) self-heal flag is `--fix-image-metadata` (build-command counterpart
 > to `pack image-metadata fix`). This spec was written during the spike and still
 > uses the older names in places below — read them as the current names.
+>
+> NOTE (backend + platform model, as-implemented): `docker-daemon` is the DEFAULT
+> `BackendType` (`""`/`auto` resolve to it; standard single-arch daemon build);
+> `buildkit` is this native backend; `buildah` is planned. Platform selection is a
+> single repeatable `--platform` flag (the old `--platforms` was removed). The
+> number of platforms a build may specify is a backend capability
+> (`BackendCapabilities.MaxPlatforms`: 1 for docker-daemon, 0/unlimited for
+> buildkit), validated in the CLI. With no `--platform`, the build defaults to the
+> HOST platform for both backends.
 
 ## Two-repo split (read this first)
 
@@ -219,8 +228,9 @@ locally, including REPEATED rebuilds and rebases.
 
 #### Acceptance Criteria
 
-1. THE approach SHALL be the opt-in `buildkit` backend
-   (`--build-backend=buildkit`), selected behind `--buildkit`.
+1. THE approach SHALL be the opt-in `buildkit` backend, selected via
+   `--build-backend buildkit` (there is no separate `--buildkit` toggle; the default
+   backend is `docker-daemon`).
 2. THE MVP SHALL build `samples/go/no-imports` to a local registry via the local MVP
    strategy, with a runnable check (real layers, CNB labels incl a correct
    `io.buildpacks.lifecycle.metadata` after finalize, launch binary present).
