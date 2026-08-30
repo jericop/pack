@@ -4,6 +4,16 @@ inclusion: manual
 
 # Verification: llb.OCILayout() for Native Image Export (BuildKit v0.30.0)
 
+> **STATUS — obsolete (OCI-layout path removed).** This entire document verifies
+> the OCI-layout export path (`llb.OCILayout()` import + `-layout`/`-pull-run-image`
+> + `PushOCILayoutAsManifestList` + `--buildkit-export-mode oci-layout`) from the
+> `oci-layout-tag-elimination` spike. That path, the LLB/Dockerfile backends, the
+> `oci_layout_*.go` files, and the `-pull-run-image` flag have all been DELETED.
+> The implemented design pushes natively in BuildKit (single `buildkit` backend)
+> and authors CNB metadata in a post-push `phase/finalize` step. Retained only as a
+> record of the BuildKit API investigation (which remains factually accurate about
+> the moby/buildkit API). See `buildkit-multiarch.md` for the current design.
+
 ## Purpose
 
 Verify whether `llb.OCILayout()` can be used to import an OCI layout produced by an earlier build step and re-export it as a (multi-platform) image via BuildKit's native `ExporterImage` — enabling elimination of intermediate tags without pack shelling out to `docker buildx` or re-pushing via go-containerregistry.

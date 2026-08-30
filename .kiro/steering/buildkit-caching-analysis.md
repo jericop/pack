@@ -4,6 +4,16 @@ inclusion: manual
 
 # BuildKit Caching Analysis for CNB Lifecycle Builds
 
+> **STATUS — historical analysis (generated-Dockerfile era).** The caching
+> reasoning here is sound and still informative, but it is framed around the
+> DELETED generated-Dockerfile model (`FROM <builder-image>` + per-phase `RUN` +
+> `COPY . /workspace`). The implemented design uses the single `buildkit` backend:
+> pack assembles the image in-process via `llb.Copy` per emitted CNB layer and the
+> lifecycle finalizes CNB metadata post-push (see `buildkit-multiarch.md`). The
+> closing line about "the OCI layout approach ... without a new lifecycle export
+> mode" refers to a path that was NOT chosen (OCI-layout mode was removed). Read as
+> background on why per-layer caching of the final image is a marginal win.
+
 ## How BuildKit Layer Caching Works
 
 BuildKit caches the result of each instruction (RUN, COPY, etc.) based on its inputs. If the inputs haven't changed since the last build, the cached result is reused and the instruction is skipped entirely. This is what you see as "CACHED" in `docker buildx build` output.

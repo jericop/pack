@@ -4,41 +4,55 @@ inclusion: manual
 
 # Fork Release Process (jericop/pack)
 
-This fork ships experimental builds of `pack` (the BuildKit LLB OCI-layout
-multi-arch work) to the owner's own GitHub releases and Docker Hub, without
-touching the upstream `buildpacks/*` destinations. The upstream release pipeline
-was disabled for the fork and replaced by a slim, tag-driven pipeline.
+This fork ships experimental builds of `pack` (the BuildKit multi-arch work, with
+a single builder-agnostic `buildkit` build backend) to the owner's own GitHub
+releases and Docker Hub, without touching the upstream `buildpacks/*`
+destinations. The upstream release pipeline was disabled for the fork and
+replaced by a slim, tag-driven pipeline.
+
+## Tag schemes
+
+Two tag shapes both trigger `fork-release`:
+
+- **Classic:** `v<version>` (e.g. `v0.0.1-buildkit-poc`) → image
+  `docker.io/jericop/pack:<version>` (leading `v` stripped).
+- **Feature-line (current):** `buildkit-native-export-v<x.y.z>` (e.g.
+  `buildkit-native-export-v0.1.0`) → image
+  `docker.io/jericop/pack:buildkit-native-export-v<x.y.z>` (tag used verbatim).
+  This matches the lifecycle + builder tags so all three images share one string.
 
 ## TL;DR — cut a release
 
-1. Commit your work on the working branch (`buildkit-multi-arc-poc`).
-2. Push an annotated tag `v<version>` at the commit you want to release, e.g.:
+1. Commit your work on the working branch (`buildkit-native-export`).
+2. Push an annotated tag at the commit you want to release, e.g.:
    ```bash
-   git tag -a v0.0.1-buildkit-poc <commit> -m "pack v0.0.1-buildkit-poc"
-   git push origin v0.0.1-buildkit-poc
+   git tag -a buildkit-native-export-v0.1.0 <commit> -m "pack buildkit-native-export-v0.1.0"
+   git push origin buildkit-native-export-v0.1.0
    ```
    This triggers the `fork-release` workflow.
 3. The workflow runs unit tests, builds the Linux binaries, and creates a
    **draft** GitHub Release AT THAT TAG with the `.tgz` artifacts attached.
 4. **Publish the draft release** in the GitHub UI (makes it + artifacts public).
-5. **Run the `delivery / docker` workflow manually** with `tag_name: v<version>`
-   to build + push the multi-arch image to `docker.io/jericop/pack:<version>`.
+5. **Run the `delivery / docker` workflow manually** with
+   `tag_name: buildkit-native-export-v0.1.0` to build + push the multi-arch image
+   to `docker.io/jericop/pack:buildkit-native-export-v0.1.0`.
 
 Steps 4 and 5 are INDEPENDENT manual actions.
 
 ## Everything lines up (tag-driven)
 
-Because you push the git tag first, all four "tags" match:
+Because you push the git tag first, all "tags" match (feature-line example):
 
-| Thing              | Value                                           |
-|--------------------|-------------------------------------------------|
-| git tag            | `v0.0.1-buildkit-poc`                           |
-| GitHub release tag | `v0.0.1-buildkit-poc`                           |
-| Docker image tag   | `docker.io/jericop/pack:0.0.1-buildkit-poc`     |
+| Thing              | Value                                                   |
+|--------------------|---------------------------------------------------------|
+| git tag            | `buildkit-native-export-v0.1.0`                         |
+| GitHub release tag | `buildkit-native-export-v0.1.0`                         |
+| Docker image tag   | `docker.io/jericop/pack:buildkit-native-export-v0.1.0`  |
 
-`delivery-docker.yml` checks out the source at the git tag (`ref: v<version>`);
-since you pushed that tag, the checkout resolves. It strips the leading `v` for
-the Docker tag.
+`delivery-docker.yml` checks out the source at the git tag verbatim (a `git_tag`
+output); since you pushed that tag, the checkout resolves. The Docker image tag
+strips only a single leading `v`, so the classic `v<version>` tag becomes
+`<version>` while the feature-line tag (no leading `v`) passes through unchanged.
 
 ## The active workflow: `fork-release.yml`
 
@@ -69,21 +83,21 @@ s390x, ppc64le — it does NOT reuse the release `.tgz` binaries.
 Run it manually:
 
 1. Actions → "delivery / docker" → "Run workflow".
-2. `tag_name`: the release tag, e.g. `v0.0.1-buildkit-poc` (include the `v`).
+2. `tag_name`: the release tag, e.g. `buildkit-native-export-v0.1.0`.
    `tag_latest`: optional; check to also tag `:latest` (tiny) / `:base`.
 
 CLI alternative (if `gh` is authenticated as the fork owner):
 
 ```bash
-gh workflow run "delivery / docker" -f tag_name=v0.0.1-buildkit-poc -f tag_latest=false
+gh workflow run "delivery / docker" -f tag_name=buildkit-native-export-v0.1.0 -f tag_latest=false
 ```
 
 ## Integration tests: `fork-integration.yml` (manual)
 
 `.github/workflows/fork-integration.yml` runs the BuildKit integration tests that
 are gated off in the normal unit/release runs. It runs AUTOMATICALLY on every
-push to `buildkit-multi-arc-poc`, and can also be run manually
-(`workflow_dispatch`) with custom inputs.
+push to the working branch, and can also be run manually (`workflow_dispatch`)
+with custom inputs.
 
 - On a `push` event there are no workflow inputs, so each step falls back to the
   `DEFAULT_*` env vars in the workflow (builder image, platforms, ttl.sh, 24h,
@@ -91,16 +105,17 @@ push to `buildkit-multi-arc-poc`, and can also be run manually
 - On a manual `workflow_dispatch` run, the inputs you supply override those
   defaults (`${{ github.event.inputs.X || env.DEFAULT_X }}`).
 - Heads-up: each run does a multi-arch build (arm64 under QEMU emulation) and a
-  ttl.sh push, so a full run takes several minutes. If push-on-every-commit gets
-  too heavy, narrow the `push:` `branches`/add `paths` filters in the workflow.
+  ttl.sh push, so a full run takes several minutes.
 
 What it does on a Linux runner:
-- sets up QEMU + a plain `docker-container` buildx builder,
+- sets up QEMU + a `docker-container` buildx builder,
 - clones the sample app (`paketo-buildpacks/samples`, `go/no-imports`),
-- runs the Tier 2 (no-registry) tests: `TestOCILayoutOnDiskIntegration`,
-  `TestOCILayoutParityIntegration`, `TestOCILayoutRebaseIntegration`,
-- optionally runs the Tier 3 registry test `TestOCILayoutRegistryIntegration`,
-  pushing to the **ttl.sh** ephemeral, anonymous registry.
+- runs a buildkit-native multi-arch build and (optionally) pushes to the
+  **ttl.sh** ephemeral, anonymous registry.
+
+> The OCI-layout integration tests referenced by earlier revisions
+> (`TestOCILayout*`) were removed along with the OCI-layout export mode; the
+> single `buildkit` backend pushes natively and finalizes post-push.
 
 Why ttl.sh (and why NO code changes were needed):
 - ttl.sh is a real HTTPS registry, so go-containerregistry's default secure
@@ -109,15 +124,14 @@ Why ttl.sh (and why NO code changes were needed):
   already uses works as-is.
 - Images auto-expire, so there is nothing to clean up and no local
   registry/network to stand up.
-- In multi-arch OCI-layout mode the manifest-list push is HOST-SIDE
-  (`remote.WriteIndex`), so only the runner needs registry egress; the builder
-  just produces on-disk per-arch layouts.
+- The multi-arch manifest is pushed natively by the buildkit backend; the
+  host-side finalize step only re-pushes config+manifest(+index).
 
 Inputs (workflow_dispatch):
 - `builder_image` — multi-arch builder image with the patched lifecycle
-  (default `jericop/ubuntu-noble-builder:skip-chown-poc`).
+  (default `jericop/ubuntu-noble-builder:buildkit-native-export`).
 - `platforms` — default `linux/amd64,linux/arm64`.
-- `run_registry_test` — also run the Tier 3 ttl.sh test (default true).
+- `run_registry_test` — also run the ttl.sh push (default true).
 - `registry_base` — default `ttl.sh`. Point at GHCR/Docker Hub for a persistent
   registry (would then require auth/`docker login` in the workflow).
 - `ttl` — ttl.sh image lifetime, default `24h` (ttl.sh MAX is 24h; longer values
@@ -129,13 +143,13 @@ longer for review, switch `registry_base` to a persistent registry you own
 
 ## Cutting a release (tag + optional bookkeeping)
 
-Keep iterating on `buildkit-multi-arc-poc`; the tag is the release pointer. There
-is no longer a `release/**` branch or a separate `release-cut/*` marker tag — the
-`v<version>` tag IS the marker and the trigger.
+Keep iterating on `buildkit-native-export`; the tag is the release pointer. There
+is no `release/**` branch or a separate `release-cut/*` marker tag — the git tag
+IS the marker and the trigger.
 
 ```bash
-git tag -a v<version> <commit-or-branch> -m "pack v<version>"
-git push origin v<version>
+git tag -a buildkit-native-export-v<x.y.z> <commit-or-branch> -m "pack buildkit-native-export-v<x.y.z>"
+git push origin buildkit-native-export-v<x.y.z>
 ```
 
 ## Configuration (fork repo settings)

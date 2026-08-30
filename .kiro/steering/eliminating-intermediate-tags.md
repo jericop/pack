@@ -4,6 +4,17 @@ inclusion: manual
 
 # Eliminating Intermediate Tags in BuildKit Multi-Arch Builds
 
+> **STATUS — historical approach comparison; superseded outcome.** This weighs
+> four approaches to eliminating intermediate per-arch tags. The IMPLEMENTED
+> outcome is the buildkit-native build-then-finalize design: BuildKit builds and
+> pushes ONE multi-arch image natively (no intermediate tags) and the lifecycle
+> `phase/finalize` library authors the CNB metadata post-push. "Approach 4
+> (Hybrid — CHOSEN APPROACH)" and the OCI-layout Approach 2 described below (both
+> built on a generated Dockerfile, `-layout`/`-pull-run-image`, `oci_layout_push.go`)
+> were NOT the final implementation — those files and the `-pull-run-image` flag
+> have been removed. Read as design-exploration history. See
+> `buildkit-multiarch.md` for the current design.
+
 ## Problem Statement
 
 The current BuildKit multi-architecture build flow creates intermediate per-architecture tags on the registry:

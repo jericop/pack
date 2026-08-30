@@ -4,6 +4,17 @@ inclusion: manual
 
 # Lifecycle Output Contract for External Image Assembly
 
+> **STATUS — EXPLORED, NOT IMPLEMENTED.** This proposes a `-export-mode layers`
+> lifecycle contract (decomposed layer tarballs/dirs + manifest.json) for external
+> assembly tools. It was NOT chosen. The implemented design uses the single
+> `buildkit` backend: the lifecycle records per-layer Source refs in emit-mode
+> (`io.buildpacks.lifecycle.prepared-metadata`), pack assembles via in-process
+> `llb.Copy`, and a post-push `phase/finalize` step authors the final CNB metadata.
+> There is no `-export-mode layers` flag, no manifest.json contract, and the
+> generated-Dockerfile / `-layout` consumption examples below are historical. The
+> layer-order/rebase reasoning remains a useful reference. See `buildkit-changes.md`
+> (lifecycle) and `buildkit-multiarch.md` (pack) for the current design.
+
 ## Purpose
 
 This document defines the contract between the lifecycle exporter's output and external image assembly tools (BuildKit, Buildah, Podman). The goal is a universal, tool-agnostic output format that any container build tool can consume to produce the final app image with full caching support.

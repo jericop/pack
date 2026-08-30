@@ -7,6 +7,17 @@ inclusion: auto
 This steering file contains the full RFC document for the BuildKit multi-architecture build feature.
 Source: jericop/cnb-rfcs branch `buildkit-mutliarch-build`, file `text/0000-buildkit-multiarch-build.md`
 
+> **STATUS — historical spike-era RFC snapshot.** This is a verbatim copy of the
+> original RFC written during the exploration spike. The implementation has since
+> converged on a SINGLE builder-agnostic `buildkit` build backend
+> (build-then-finalize): the `buildkit-dockerfile`/`buildkit-llb`/`buildkit-native`
+> backend values, the generated-Dockerfile model, the OCI-layout export mode, and
+> the lifecycle `-pull-run-image` flag described below have all been REMOVED. The
+> build-metadata label is now `io.buildpacks.lifecycle.prepared-metadata`. For the
+> current-state summary see `buildkit-multiarch.md`; the upstream RFC in
+> `jericop/cnb-rfcs` is a separate follow-up to update. Read the sections below as
+> historical design context, not current behavior.
+
 ---
 
 # Meta

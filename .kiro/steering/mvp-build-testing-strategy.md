@@ -2,13 +2,18 @@
 inclusion: always
 ---
 
-# MVP Build Testing Strategy (BuildKit multi-arch / OCI-layout)
+# MVP Build Testing Strategy (BuildKit multi-arch, buildkit-native backend)
 
 While the BuildKit multi-arch feature is in MVP, we validate it by driving the
 real `pack` binary against a sample app and publishing to a LOCAL registry, then
 comparing an initial build vs a rebuild to observe caching behavior. We do NOT
 iterate through unit/integration test files for this — we use the CLI directly so
 we can read raw build output and timing.
+
+The branch is dedicated to a SINGLE builder-agnostic `buildkit` build backend
+(`--build-backend buildkit`). The earlier `buildkit-dockerfile`, `buildkit-llb`,
+and `buildkit-native` backend values and the OCI-layout export mode
+(`--buildkit-export-mode`) have been removed.
 
 ## When to run the FULL multi-language suite vs a single smoke build
 
@@ -100,10 +105,10 @@ mkdir -p /tmp/kiro-command-logs
 build_cmd() {
   /tmp/pack-poc build localhost:5050/no-imports:multiarch \
     --path /Users/jpena/.repos/paketo-buildpacks/samples/go/no-imports \
-    --builder jericop/ubuntu-noble-builder:buildkit-multi-arch-poc \
+    --builder jericop/ubuntu-noble-builder:buildkit-native-export \
     --run-image paketobuildpacks/ubuntu-noble-run-tiny:latest \
     --platforms linux/amd64,linux/arm64 \
-    --buildkit --build-backend buildkit-llb --buildkit-export-mode oci-layout \
+    --buildkit --build-backend buildkit \
     --buildkit-builder pack-multiplatform \
     --publish --trust-builder --verbose
 }
@@ -138,17 +143,6 @@ binary (the workspace app). Check each per-arch image:
 
 Save the verification output to `/tmp/kiro-command-logs/`.
 
-## Reference: Dockerfile backend (run ONCE)
-
-Once the LLB (buildkit-llb) backend build + rebuild + runnable check all pass,
-run the SAME `pack build` twice with the Dockerfile backend
-(`--build-backend buildkit-dockerfile`, which uses registry export mode) and save
-output + durations. This is a ONE-TIME reference capture: the Dockerfile backend
-code is NOT changing, so its logs/timings serve as the comparison baseline for
-future LLB changes. Do not re-run the Dockerfile backend on every iteration —
-reuse the saved reference logs. Use a distinct image tag (e.g.
-`localhost:5050/no-imports:dockerfile`) so it does not clobber the LLB result.
-
 ## On errors: iterate, then resume
 
 If a build ERRORS, switch to fixing it: read the full log, diagnose, change code
@@ -162,7 +156,5 @@ failure — get back to it after the fix.
 - Is the builder image re-pulled by pack (host) and/or re-resolved by BuildKit on
   the rebuild? (Use `--pull-policy if-not-present` to avoid pack's host re-pull.)
 - Are lifecycle phase vertices `CACHED` on the rebuild?
-- Is the run image re-pulled inside the analyzer RUN each time (a known caching
-  liability of `-pull-run-image` inside a RUN)? This is a key thing to optimize.
 - Total wall time cold vs warm, and per-arch behavior (amd64 emulated vs arm64
   native on Apple silicon).

@@ -2,9 +2,12 @@
 inclusion: manual
 ---
 
-# Local Test Environment for BuildKit Multi-Arch + OCI Layout Testing
+# Local Test Environment for BuildKit Multi-Arch Testing
 
-This documents the local setup used to test the BuildKit multi-arch build feature, including the LLB OCI layout native push work. It solves two problems: (1) the `docker-container` builder's network isolation from a local registry, and (2) a macOS port-5000 conflict.
+This documents the local setup used to test the BuildKit multi-arch build feature
+(the single builder-agnostic `buildkit` backend). It solves two problems: (1) the
+`docker-container` builder's network isolation from a local registry, and (2) a
+macOS port-5000 conflict.
 
 ## Summary
 
@@ -109,13 +112,18 @@ localhost:5001/<name>:<tag>
 
 Note: the in-network name (`pack-test-registry:5000`) and the host mapping (`localhost:5001`) point at the same registry but use different host:port. Tags pushed by a build use the name the build referenced. For a build that pushes to `pack-test-registry:5000/...`, inspect from the host by querying `localhost:5001` for the same repository/tag path.
 
-## Relationship to the Spec
+## Relationship to testing
 
-This environment supports the `oci-layout-tag-elimination` spec's testing tiers:
-- Tier 2 (on-disk parity) does NOT need this registry — it inspects OCI layouts on disk
-- Tier 3 (optional, env-var gated registry integration) uses this registry to verify the native push produces no intermediate tags and that pushed artifacts match registry mode
+This environment is what the buildkit-native build tests and the manual
+smoke/benchmark builds push to. The `buildkit` backend pushes the multi-arch
+manifest natively and then finalizes CNB metadata post-push (host-side), so both
+the builder (over the `pack-test` network, by container name) and the host (via
+the `localhost` port mapping) must reach the registry; `PACK_HOST_REGISTRY_REMAP`
+bridges the two names for the host-side finalize step.
 
-The env-var gate (e.g., `PACK_TEST_REGISTRY_ENABLED` + a registry ref) keeps registry tests skipped by default; this setup is what you enable them against locally.
+Any env-var-gated registry integration tests (e.g. `PACK_TEST_REGISTRY_ENABLED` +
+a registry ref) stay skipped by default; this setup is what you enable them
+against locally.
 
 ## Teardown
 

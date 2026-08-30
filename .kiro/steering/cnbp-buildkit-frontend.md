@@ -4,6 +4,17 @@ inclusion: manual
 
 # Prior Art: cnbp — BuildKit Frontend for Cloud Native Buildpacks
 
+> **STATUS — prior-art analysis; "proposed" options are now decided.** This
+> documents the external EricHripko/cnbp project and the tradeoff space we
+> analyzed. Where it calls Option 2c "being explored," that is now the IMPLEMENTED
+> design: the lifecycle GENERATES the CNB metadata to match BuildKit's produced
+> diffIDs (a post-push `phase/finalize` step authoring
+> `io.buildpacks.lifecycle.prepared-metadata` → `io.buildpacks.lifecycle.metadata`),
+> so there is NO metadata-SHA rewrite and NO custom BuildKit frontend — pack
+> assembles the image in-process via `llb.Copy`. The `buildkit/cnbfrontend` package
+> and `cmd/cnb-frontend` are DELETED, and the OCI-layout/`-pull-run-image` options
+> (2a) were not chosen. Read the rest as prior-art/tradeoff context.
+
 ## Overview
 
 `cnbp` (by EricHripko, ~2020-2021) is a **custom BuildKit frontend** that implements the Cloud Native Buildpacks Platform spec entirely within BuildKit's LLB graph system. It runs lifecycle phases as LLB operations and — critically — **replaces the lifecycle exporter** with a custom export step that constructs the final image as native BuildKit LLB operations.

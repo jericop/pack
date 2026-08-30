@@ -6,7 +6,12 @@ inclusion: manual
 
 ## Status
 
-**Future enhancement idea — NOT part of the current intermediate-tag-elimination work.**
+**Future enhancement idea — NOT part of the current work.**
+
+> Note: the Dockerfile / multi-stage examples below assume the DELETED
+> generated-Dockerfile model. If this optimization is ever pursued it would target
+> the implemented `llb.Copy`-based native assembly instead. The pre-copy /
+> multi-stage caching idea itself is orthogonal to that and still stands.
 
 This document captures an exploration of two related ideas for enabling BuildKit cross-build caching of runtime-installer buildpacks (JRE, Python, Node, etc.):
 1. Splitting buildpack execution around the `COPY . /workspace` instruction (pre-copy vs post-copy)
@@ -196,7 +201,7 @@ The multi-stage approach provides the strongest cross-build caching because the 
 
 - Document as a future enhancement in the RFC (mention BuildKit's multi-stage caching as a potential optimization)
 - Pursue as its own RFC + lifecycle enhancement AFTER the current BuildKit multi-arch + tag-elimination work lands
-- The current work (OCI layout, no intermediate tags) does not depend on this and should proceed independently
+- The current work (the single buildkit-native backend, no intermediate tags) does not depend on this and should proceed independently
 - The multi-stage variant is the more promising of the two (stronger isolation) and should be the primary design if pursued
 
 ## Relationship to Overall BuildKit Strategy
