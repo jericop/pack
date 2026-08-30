@@ -11,8 +11,10 @@ The `buildkit-native-export` branch is dedicated to a SINGLE builder-agnostic
 build backend named `buildkit` (build-then-finalize). Earlier proof-of-concept
 backends (`buildkit-dockerfile`, `buildkit-llb`) and the OCI-layout export mode
 have been removed. The `BuildBackend` interface, `BackendType` enum, factory, and
-`--build-backend` flag are intentionally KEPT so a future buildah-podman backend
-can be added without reworking the abstraction.
+`--build-backend` flag are intentionally KEPT so a future buildah backend
+can be added without reworking the abstraction. (The backend is named `buildah`;
+podman is the sibling container tool in the same ecosystem, but the build library
+is buildah.)
 
 > The canonical summary of this feature lives in the `buildkit-multiarch` steering
 > file (`.kiro/steering/buildkit-multiarch.md`); it is the source of truth. This
@@ -80,7 +82,7 @@ pack build registry.example.com/myapp:latest \
   --builder jericop/ubuntu-noble-builder:buildkit-native-export \
   --run-image paketobuildpacks/ubuntu-noble-run:latest \
   --platforms linux/amd64,linux/arm64 \
-  --buildkit --build-backend buildkit \
+  --build-backend buildkit \
   --buildkit-builder pack-multiplatform \
   --publish --trust-builder
 ```
@@ -98,7 +100,7 @@ pack build registry.example.com/myapp:latest \
   --path ./app \
   --builder jericop/ubuntu-noble-builder:buildkit-native-export \
   --platforms linux/amd64,linux/arm64 \
-  --buildkit --build-backend buildkit \
+  --build-backend buildkit \
   --buildkit-builder pack-multiplatform \
   --buildkit-cache-from type=registry,ref=registry.example.com/myapp-cache:latest \
   --buildkit-cache-to type=registry,ref=registry.example.com/myapp-cache:latest,mode=max \
@@ -143,14 +145,13 @@ host-side finalize step reuses the same pack-resolved credentials.
 
 | Flag | Description |
 |------|-------------|
-| `--buildkit` | Enable BuildKit backend (experimental, required for `--platforms`) |
-| `--platforms` | Comma-separated target platforms (e.g. `linux/amd64,linux/arm64`) |
-| `--build-backend` | `auto` (default) or `buildkit` — the only implemented backend; retained for a future buildah-podman backend |
+| `--build-backend` | [experimental] Selects the native build engine AND opts into the native (multi-arch, build-then-finalize) path by being set. `auto` or `buildkit` (both resolve to BuildKit today; `buildah` planned). Empty (default) = standard single-arch build. There is no separate `--buildkit` toggle. |
+| `--platforms` | Comma-separated target platforms (e.g. `linux/amd64,linux/arm64`); requires `--build-backend` |
 | `--buildkit-builder` | Name of the buildx (docker-container) builder |
 | `--buildkit-cache-from` | External registry cache source (`type=registry,ref=...`) |
 | `--buildkit-cache-to` | External registry cache destination (`type=registry,ref=...,mode=max`) |
 | `--lifecycle-image` | Emit/finalize-capable lifecycle image (only needed when the builder does not already bundle one) |
-| `--buildkit-fix-image-metadata` | [PLANNED — not implemented] If the target image already exists remotely and is not yet finalized, run finalize on it in place before building (self-healing). Default off = warn and stop. |
+| `--fix-image-metadata` | Self-healing: do NOT build; run finalize in place on the EXISTING pushed image (the image-name arg) from its retained prepared-metadata label. Idempotent. Standalone counterpart: `pack image-metadata fix`. |
 
 ## Caveats
 
@@ -163,10 +164,11 @@ to either the pre-finalize or the finalized image, never a partial one. If final
 fails before its final `PUT`, the pushed image remains **runnable** (only its CNB
 metadata is not yet authored), so it cannot be cleanly rebuilt or rebased until
 finalized. Finalize is IDEMPOTENT — re-running it (or the next build) authors
-identical metadata. A future opt-in self-healing flow
-(`--buildkit-fix-image-metadata`) can finalize a previously-interrupted image in
-place using its retained prepared-metadata label (finalize's
-`KeepPreparedMetadataLabel` option; not implemented).
+identical metadata. Two opt-in self-heal entry points finalize a
+previously-interrupted image in place using its retained prepared-metadata label
+(finalize's `KeepPreparedMetadataLabel` option): the build-time
+`pack build --fix-image-metadata <image>` (no-build short-circuit) and the
+standalone `pack image-metadata fix <image>`.
 
 ### Layer diffIDs differ from a normal registry-mode export
 
@@ -218,16 +220,19 @@ networking, for local validation:
 
 See `.kiro/steering/local-test-environment.md` for the full recipe.
 
+## Implemented self-heal (was future work)
+
+Self-heal is shipped via two idempotent, opt-in entry points that finalize an
+already-pushed-but-not-finalized image in place (config+manifest only, no layer
+egress) using its retained prepared-metadata label: the build-time
+`pack build --fix-image-metadata <image>` and the standalone
+`pack image-metadata fix <image>` (which also has `inspect` + `verify` siblings).
+
 ## Future Work
 
-- **Self-healing builds**: finalize an already-pushed-but-not-finalized target image
-  in place (config+manifest only, no layer egress) behind an opt-in
-  `--buildkit-fix-image-metadata` flag, using the retained prepared-metadata label.
-- **Standalone finalize / apply-image-metadata subcommand**: wrap the lifecycle
-  `phase/finalize` library in a lifecycle subcommand so an operator/CI tool can
-  finalize an already-pushed image outside pack. Underpins the self-healing flow.
-- **buildah-podman backend**: add a second `BuildBackend` implementation (the
-  abstraction and `--build-backend` flag are retained for this).
+- **buildah backend**: add a second `BuildBackend` implementation (the abstraction
+  and `--build-backend` flag are retained for this; `buildah` would be a new
+  `--build-backend` value).
 
 ## Related Repositories
 

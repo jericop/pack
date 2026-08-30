@@ -20,7 +20,7 @@ type ImageMetadataFixFlags struct {
 // idempotent: finalizing an already-finalized image is a no-op.
 //
 // This is the standalone counterpart to the build-time
-// `pack build --buildkit-fix-image-metadata` self-healing flag.
+// `pack build --fix-image-metadata` self-healing flag.
 func ImageMetadataFix(logger logging.Logger) *cobra.Command {
 	var flags ImageMetadataFixFlags
 	cmd := &cobra.Command{
@@ -32,7 +32,7 @@ func ImageMetadataFix(logger logging.Logger) *cobra.Command {
 
 Reads the image's actual produced layer diffIDs plus the io.buildpacks.lifecycle.prepared-metadata label, authors io.buildpacks.lifecycle.metadata, and re-pushes config+manifest (+ index for a manifest list) only — no layer blobs are read, added, or re-uploaded. Handles both a single image and a manifest list.
 
-Idempotent: running it against an already-finalized image is a no-op. This is the standalone counterpart to 'pack build --buildkit-fix-image-metadata'.`,
+Idempotent: running it against an already-finalized image is a no-op. This is the standalone counterpart to 'pack build --fix-image-metadata'.`,
 		RunE: logError(logger, func(cmd *cobra.Command, args []string) error {
 			imageName := args[0]
 			if imageName == "" {

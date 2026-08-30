@@ -62,16 +62,17 @@ pack build <your-registry>/my-app:latest \
   --builder jericop/ubuntu-noble-builder:buildkit-native-export \
   --run-image paketobuildpacks/ubuntu-noble-run:latest \
   --platforms linux/amd64,linux/arm64 \
-  --buildkit --build-backend buildkit \
+  --build-backend buildkit \
   --buildkit-builder pack-multiplatform \
   --publish --trust-builder
 ```
 
-What each BuildKit-specific flag does:
+What each native-build flag does:
 
-- `--buildkit` — enable the BuildKit backend (requires experimental mode).
-- `--build-backend buildkit` — select the single builder-agnostic buildkit backend
-  (this is the default when `--buildkit` is set; shown here for clarity).
+- `--build-backend buildkit` — opt into the native (multi-arch, build-then-finalize)
+  path and select the builder-agnostic `buildkit` engine (requires experimental
+  mode). Setting this flag is the opt-in; there is no separate `--buildkit` toggle.
+  `auto` also resolves to `buildkit` today.
 - `--platforms linux/amd64,linux/arm64` — the target architectures for the one
   multi-arch image.
 - `--buildkit-builder pack-multiplatform` — the `docker-container` buildx builder
@@ -194,7 +195,7 @@ runners still benefit from caching. A minimal GitHub Actions sketch:
       --builder jericop/ubuntu-noble-builder:buildkit-native-export \
       --run-image paketobuildpacks/ubuntu-noble-run:latest \
       --platforms linux/amd64,linux/arm64 \
-      --buildkit --build-backend buildkit \
+      --build-backend buildkit \
       --buildkit-builder pack-multiplatform \
       --buildkit-cache-from type=registry,ref=$REGISTRY/my-app-cache:latest \
       --buildkit-cache-to   type=registry,ref=$REGISTRY/my-app-cache:latest,mode=max \

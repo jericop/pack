@@ -9,7 +9,7 @@ import (
 // NewImageMetadataCommand is the parent of the `pack image-metadata` subcommands
 // (`verify`, `fix`). They inspect and repair the CNB metadata on an image that a
 // buildkit build already pushed, WITHOUT rebuilding — the standalone counterpart
-// to the build-time `--buildkit-fix-image-metadata` self-healing flag.
+// to the build-time `--fix-image-metadata` self-healing flag.
 func NewImageMetadataCommand(logger logging.Logger) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "image-metadata",

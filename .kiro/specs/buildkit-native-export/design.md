@@ -9,13 +9,13 @@ gateway frontend, no per-layer re-extraction, no post-push layer changes.
 
 Experimental, opt-in: `--build-backend=buildkit` (the only implemented backend
 value; `auto` resolves to it). The `BuildBackend` interface / `BackendType` enum /
-factory / `--build-backend` flag are retained for a future buildah-podman backend.
+factory / `--build-backend` flag are retained for a future `buildah` backend.
 
 > NOTE (as-implemented): this spec was written during the spike. The backend value
 > is `buildkit` (was `buildkit-native`); the build-phase label is
 > `io.buildpacks.lifecycle.prepared-metadata` (was
-> `io.buildpacks.buildkit.native.build-metadata`); the planned self-heal flag is
-> `--buildkit-fix-image-metadata`. The earlier `buildkit-dockerfile`/`buildkit-llb`
+> `io.buildpacks.buildkit.native.build-metadata`); the (implemented) self-heal flag
+> is `--fix-image-metadata`. The earlier `buildkit-dockerfile`/`buildkit-llb`
 > backends and the OCI-layout export mode have been removed. Read the older names
 > below as the current ones.
 

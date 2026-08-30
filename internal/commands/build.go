@@ -35,7 +35,6 @@ type BuildFlags struct {
 	Interactive               bool
 	Sparse                    bool
 	EnableUsernsHost          bool
-	Buildkit                  bool
 	DockerHost                string
 	CacheImage                string
 	Cache                     cache.CacheOpts
@@ -50,7 +49,7 @@ type BuildFlags struct {
 	BuildkitBuilder           string
 	BuildkitCacheFrom         []string
 	BuildkitCacheTo           []string
-	BuildkitFixRemoteMetadata bool
+	FixImageMetadata          bool
 	Policy                    string
 	Network                   string
 	DescriptorPath            string
@@ -94,14 +93,14 @@ func Build(logger logging.Logger, cfg config.Config, packClient PackClient) *cob
 				return err
 			}
 
-			// Self-healing short-circuit: --buildkit-fix-image-metadata does NOT
+			// Self-healing short-circuit: --fix-image-metadata does NOT
 			// build. It re-applies CNB metadata to an EXISTING pushed image (the
 			// image-name argument), authoring it from the image's actual layers +
 			// the prepared-metadata label. No builder, app path, or run image is
 			// needed.
-			if flags.BuildkitFixRemoteMetadata {
+			if flags.FixImageMetadata {
 				if flags.BuildBackend != "" && flags.BuildBackend != string(multiplatform.BackendBuildkit) {
-					return errors.Errorf("--buildkit-fix-image-metadata is only valid with --build-backend %s", multiplatform.BackendBuildkit)
+					return errors.Errorf("--fix-image-metadata is only valid with --build-backend %s", multiplatform.BackendBuildkit)
 				}
 				return multiplatform.FixRemoteImageMetadata(cmd.Context(), logger, inputImageName.Name(), false)
 			}
@@ -207,7 +206,6 @@ func Build(logger logging.Logger, cfg config.Config, packClient PackClient) *cob
 				DockerHost:                flags.DockerHost,
 				Platform:                  flags.Platform,
 				Platforms:                 flags.Platforms,
-				Buildkit:                  flags.Buildkit,
 				BuildBackend:              flags.BuildBackend,
 				BuildkitBuilder:           flags.BuildkitBuilder,
 				BuildkitCacheFrom:         flags.BuildkitCacheFrom,
@@ -312,13 +310,12 @@ This option may set DOCKER_HOST environment variable for the build container if 
 `)
 	cmd.Flags().StringVar(&buildFlags.LifecycleImage, "lifecycle-image", cfg.LifecycleImage, `Custom lifecycle image to use for analysis, restore, and export when builder is untrusted.`)
 	cmd.Flags().StringVar(&buildFlags.Platform, "platform", "", `Platform to build on (e.g., "linux/amd64").`)
-	cmd.Flags().StringVar(&buildFlags.Platforms, "platforms", "", `Comma-separated list of target platforms for multi-architecture builds (e.g., "linux/amd64,linux/arm64"). Requires --buildkit. Requires --publish or produces local OCI layouts.`)
-	cmd.Flags().BoolVar(&buildFlags.Buildkit, "buildkit", false, `[experimental] Use BuildKit backend for building. Required for multi-platform builds.`)
-	cmd.Flags().StringVar(&buildFlags.BuildBackend, "build-backend", "", `Build backend for multi-platform builds. Values: "auto" (default) or "buildkit"; both use the BuildKit backend today.`)
+	cmd.Flags().StringVar(&buildFlags.Platforms, "platforms", "", `Comma-separated list of target platforms for multi-architecture builds (e.g., "linux/amd64,linux/arm64"). Requires --build-backend. Requires --publish or produces local OCI layouts.`)
+	cmd.Flags().StringVar(&buildFlags.BuildBackend, "build-backend", "", `[experimental] Build backend for native (multi-architecture) builds. Setting this opts into the native build path. Values: "auto" or "buildkit" (both use the BuildKit backend today; "buildah" is planned). Empty (default) uses the standard single-arch build.`)
 	cmd.Flags().StringVar(&buildFlags.BuildkitBuilder, "buildkit-builder", "", `Name of the buildx builder to use for multi-platform builds (default: current buildx default).`)
 	cmd.Flags().StringArrayVar(&buildFlags.BuildkitCacheFrom, "buildkit-cache-from", nil, `External cache source for buildkit (e.g., "type=registry,ref=myapp-cache:latest").`)
 	cmd.Flags().StringArrayVar(&buildFlags.BuildkitCacheTo, "buildkit-cache-to", nil, `External cache destination for buildkit (e.g., "type=registry,ref=myapp-cache:latest,mode=max").`)
-	cmd.Flags().BoolVar(&buildFlags.BuildkitFixRemoteMetadata, "buildkit-fix-image-metadata", false, `[buildkit] Self-healing: do NOT build. Apply CNB metadata to an EXISTING pushed image (the image name argument) that still carries the prepared-metadata label, authoring the correct io.buildpacks.lifecycle.metadata from its actual layers and re-pushing config+manifest only. Idempotent.`)
+	cmd.Flags().BoolVar(&buildFlags.FixImageMetadata, "fix-image-metadata", false, `[experimental] Self-healing: do NOT build. Apply CNB metadata to an EXISTING pushed image (the image name argument) that still carries the prepared-metadata label, authoring the correct io.buildpacks.lifecycle.metadata from its actual layers and re-pushing config+manifest only. Idempotent. The standalone counterpart is 'pack image-metadata fix'.`)
 	cmd.Flags().StringVar(&buildFlags.Policy, "pull-policy", "", `Pull policy to use. Accepted values are always, never, and if-not-present. (default "always")`)
 	cmd.Flags().StringVar(&buildFlags.ExecutionEnv, "exec-env", "production", `Execution environment to use. (default "production"`)
 	cmd.Flags().StringVarP(&buildFlags.Registry, "buildpack-registry", "r", cfg.DefaultRegistryName, "Buildpack Registry by name")
@@ -339,7 +336,6 @@ This option may set DOCKER_HOST environment variable for the build container if 
 	if !cfg.Experimental {
 		cmd.Flags().MarkHidden("interactive")
 		cmd.Flags().MarkHidden("sparse")
-		cmd.Flags().MarkHidden("buildkit")
 		cmd.Flags().MarkHidden("platforms")
 		cmd.Flags().MarkHidden("build-backend")
 		cmd.Flags().MarkHidden("buildkit-builder")
@@ -402,12 +398,12 @@ func validateBuildFlags(flags *BuildFlags, cfg config.Config, inputImageRef clie
 		return errors.New("--platforms and --platform are mutually exclusive; use --platforms for multi-architecture builds")
 	}
 
-	if flags.Platforms != "" && !flags.Buildkit {
-		return errors.New("--platforms requires --buildkit flag (experimental feature)")
+	if flags.Platforms != "" && flags.BuildBackend == "" {
+		return errors.New("--platforms requires --build-backend (e.g. --build-backend buildkit)")
 	}
 
-	if flags.Buildkit && !cfg.Experimental {
-		return client.NewExperimentError("BuildKit multi-platform builds are currently experimental. Run 'pack config experimental true' to enable.")
+	if flags.BuildBackend != "" && !cfg.Experimental {
+		return client.NewExperimentError("Native (multi-platform) builds are currently experimental. Run 'pack config experimental true' to enable.")
 	}
 
 	return nil

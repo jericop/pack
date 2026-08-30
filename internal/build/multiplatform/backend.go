@@ -1,7 +1,7 @@
 // Package multiplatform provides abstractions for building container images
 // across multiple architectures. Today the sole backend is BuildKit (the Go SDK
 // / LLB, buildkit-native-export); the BuildBackend abstraction is retained so an
-// alternative (e.g. buildah-podman) can be added later.
+// alternative (e.g. a buildah backend) can be added later.
 package multiplatform
 
 import (
@@ -22,7 +22,7 @@ const (
 	// natively in BuildKit (FROM run-image + add the produced layers + apply the
 	// prepared config) and exports it via BuildKit's native multi-platform image
 	// export. No layer-data egress to the host. This is the sole backend today;
-	// the abstraction is retained for a future buildah-podman backend.
+	// the abstraction is retained for a future buildah backend.
 	BackendBuildkit BackendType = "buildkit"
 
 	// BackendAuto auto-detects the best available backend (currently buildkit).

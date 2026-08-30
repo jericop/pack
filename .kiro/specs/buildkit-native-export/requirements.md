@@ -60,10 +60,10 @@ host-side metadata-SHA rewrite as a pack-owned workaround.
 
 > NOTE (as-implemented): the backend value is `buildkit` (via
 > `--build-backend buildkit`), not `buildkit-native`; the build-phase label is
-> `io.buildpacks.lifecycle.prepared-metadata` (builder-agnostic); and the planned
-> self-heal flag is `--buildkit-fix-image-metadata`. This spec was written during
-> the spike and still uses the older names in places below — read them as the
-> current names.
+> `io.buildpacks.lifecycle.prepared-metadata` (builder-agnostic); and the
+> (implemented) self-heal flag is `--fix-image-metadata` (build-command counterpart
+> to `pack image-metadata fix`). This spec was written during the spike and still
+> uses the older names in places below — read them as the current names.
 
 ## Two-repo split (read this first)
 
@@ -283,7 +283,7 @@ command.
 
 1. (DEFERRED, post-MVP) WHEN a buildkit build targets an image ref that
    already exists remotely, pack MAY inspect its metadata validity; if invalid and
-   an opt-in flag (e.g. `--buildkit-fix-image-metadata`) is set, pack MAY run
+   an opt-in flag (`--fix-image-metadata`) is set, pack MAY run
    FINALIZE on the existing image in place (using its retained
    `io.buildpacks.lifecycle.prepared-metadata` label) before proceeding.
 2. This is explicitly OUT OF SCOPE for the MVP and SHALL be added only after the

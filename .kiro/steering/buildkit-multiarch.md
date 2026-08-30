@@ -6,9 +6,9 @@ inclusion: auto
 
 ## Overview
 
-This workspace contains a proof-of-concept implementation of BuildKit-based multi-architecture builds for `pack`. The feature lives in `internal/build/multiplatform/` and is gated behind `--buildkit` (requires `pack config experimental true`).
+This workspace contains a proof-of-concept implementation of BuildKit-based multi-architecture builds for `pack`. The feature lives in `internal/build/multiplatform/` and is opted into by setting `--build-backend` (requires `pack config experimental true`). There is no separate `--buildkit` toggle — the presence of `--build-backend` is the opt-in and its value selects the engine.
 
-The `buildkit-native-export` branch is dedicated to a SINGLE builder-agnostic build backend called `buildkit`. Earlier proof-of-concept backends (`buildkit-dockerfile`, `buildkit-llb`) and the OCI-layout export mode have been removed. The `BuildBackend` interface, `BackendType` enum, factory, and `--build-backend` flag are intentionally KEPT so a future buildah-podman backend can be added without reworking the abstraction.
+The `buildkit-native-export` branch is dedicated to a SINGLE builder-agnostic build backend called `buildkit`. Earlier proof-of-concept backends (`buildkit-dockerfile`, `buildkit-llb`) and the OCI-layout export mode have been removed. The `BuildBackend` interface, `BackendType` enum, factory, and `--build-backend` flag are intentionally KEPT so a future `buildah` backend can be added without reworking the abstraction. (Backend named `buildah`; podman is the sibling container tool, but the build library is buildah.)
 
 > Source of truth: this steering file is the canonical summary of the BuildKit
 > multi-arch feature. The comprehensive doc at
@@ -19,15 +19,15 @@ The `buildkit-native-export` branch is dedicated to a SINGLE builder-agnostic bu
 
 ### Single Build Backend: `buildkit`
 
-- **`--build-backend buildkit`** (the only value; `auto` resolves to it): BuildKit BUILDS and PUSHES the app image natively (one multi-arch image = one OCI index, NO intermediate per-arch tags, layer data never egresses to intermediate tags); then a lifecycle-owned FINALIZE step authors the correct CNB metadata on the pushed image from its ACTUAL produced layers. See "Build-then-finalize" below.
+- **`--build-backend buildkit`** (the only value today; `auto` resolves to it; setting the flag is also what opts into the native path — there is no separate `--buildkit` toggle): BuildKit BUILDS and PUSHES the app image natively (one multi-arch image = one OCI index, NO intermediate per-arch tags, layer data never egresses to intermediate tags); then a lifecycle-owned FINALIZE step authors the correct CNB metadata on the pushed image from its ACTUAL produced layers. See "Build-then-finalize" below.
 - Uses the BuildKit Go SDK directly (`github.com/moby/buildkit/client`), connecting to the buildkit daemon via the `docker-container://` scheme; per-arch solves run in parallel. Requires a patched lifecycle with `-skip-chown` (the BuildKit LLB API does not support uid/gid on cache mounts the way the Dockerfile frontend did).
-- The abstraction (interface/enum/factory/`--build-backend`) is retained for a future buildah-podman backend, but `buildkit` is the only implemented value today.
+- The abstraction (interface/enum/factory/`--build-backend`) is retained for a future `buildah` backend, but `buildkit` is the only implemented value today. Adding `buildah` is a new accepted `--build-backend` value, not a new top-level flag.
 
 ### Build-then-finalize
 
 - **Two phases.** (1) BUILD: run the lifecycle phases + assemble `FROM run-image` in BuildKit; BuildKit pushes one image (multi-arch = one OCI index), no intermediate tags; the build attaches a single label `io.buildpacks.lifecycle.prepared-metadata` (the ordered plan + emitted CNB labels) and does NOT write a valid final `io.buildpacks.lifecycle.metadata`. (2) FINALIZE: pack calls the lifecycle `phase/finalize` library (like `phase.Rebaser`), which reads the pushed image's produced diffIDs + the prepared-metadata label, authors `io.buildpacks.lifecycle.metadata` (per-layer SHAs = produced diffIDs; RunImage boundary), removes the prepared-metadata label, and re-pushes config+manifest(+index) only — NO layer changes.
 - **Why authoring, not rewriting.** BuildKit's exporter always assigns diffIDs at export; a frontend cannot inject blobs via the gateway result (verified, moby/buildkit v0.32.2). An earlier spike emitted metadata with the INTENDED diffIDs then pack REWROTE the SHAs post-push (a patch). The current design never writes a wrong final label: finalize AUTHORS the metadata against the produced diffIDs the first time, in the lifecycle (one source of truth), not pack.
-- **Finalize atomicity + failure.** Finalize is a separate registry op after the push; it re-pushes to the SAME tag via a single manifest/index `PUT` (tag-atomic). On failure the tag still resolves to the pushed (pre-finalize) image — runnable, just not yet rebuildable/rebaseable. Finalize is IDEMPOTENT. A future opt-in `--buildkit-fix-image-metadata` can self-heal an interrupted build's image in place using its retained prepared-metadata label (finalize `KeepPreparedMetadataLabel`). Not implemented.
+- **Finalize atomicity + failure.** Finalize is a separate registry op after the push; it re-pushes to the SAME tag via a single manifest/index `PUT` (tag-atomic). On failure the tag still resolves to the pushed (pre-finalize) image — runnable, just not yet rebuildable/rebaseable. Finalize is IDEMPOTENT. Two opt-in self-heal entry points exist: the build-time `pack build --fix-image-metadata <image>` (no-build short-circuit) and the standalone `pack image-metadata fix <image>`; both re-run finalize against a pushed image using its retained prepared-metadata label (finalize `KeepPreparedMetadataLabel`).
 - **Layer diffIDs differ** from a normal registry-mode build (BuildKit recomputes them). Rebase depends only on the run-image `TopLayer` boundary, and finalize makes per-layer metadata SHAs match the actual layers, so rebase + buildpack-layer patching both work. Validated across REPEATED rebuilds + rebases + rebuild-after-rebase + multi-arch.
 - **No frontend; assembly is `llb.Copy` from emitted sources.** The `buildkit/cnbfrontend` package + `cmd/cnb-frontend` are DELETED. Pack drives an IN-PROCESS gateway BuildFunc (`internal/build/multiplatform/native_buildfunc.go`) that assembles `FROM run-image` by `llb.Copy`-ing each CNB layer from its emitted filesystem SOURCE (buildpack layers from `/layers/<bp>/<layer>`, app from `/workspace`, launcher file; chown to CNB uid:gid). Synthesized layers (process-types) are copied from a tiny tree the emit step extracts in Go. NO re-materialization of large layers. emit-mode records per-layer Source refs (lifecycle `layers.Layer.Source` → `emit.LayerOp.Source`). App slices are honored via `llb.Copy` `IncludePatterns` per slice.
 - **Run image** resolved from the analyzer-written `/layers/analyzed.toml` (digest-pinned), used as the `llb.Image` base; never modified. A custom `--run-image` and rebase onto a different run image are both supported (finalize authors the correct `runImage.reference` + `topLayer`).
@@ -63,13 +63,12 @@ The Dockerfile backend, LLB backend, Dockerfile generator, and all `oci_layout_*
 
 | Flag | Description |
 |------|-------------|
-| `--buildkit` | Enable BuildKit backend (experimental) |
-| `--platforms` | Comma-separated platforms (e.g., `linux/amd64,linux/arm64`) |
-| `--build-backend` | `auto` (default) or `buildkit` — the only implemented backend; the flag is retained for a future buildah-podman backend |
+| `--build-backend` | [experimental] Opts into the native path (by being set) AND selects the engine: `auto` or `buildkit` (both BuildKit today; `buildah` planned). No separate `--buildkit` toggle |
+| `--platforms` | Comma-separated platforms (e.g., `linux/amd64,linux/arm64`); requires `--build-backend` |
 | `--buildkit-builder` | Name of the buildx (docker-container) builder |
 | `--buildkit-cache-from` | Registry cache source (`type=registry,ref=...`) |
 | `--buildkit-cache-to` | Registry cache destination (`type=registry,ref=...,mode=max`) |
-| `--buildkit-fix-image-metadata` | (PLANNED, not implemented) if the target image already exists remotely with invalid/stale CNB metadata, fix it in place before building (self-healing). Default off = warn and stop. |
+| `--fix-image-metadata` | Self-healing: do NOT build; apply/finalize CNB metadata in place on the EXISTING pushed image (the image-name arg) from its retained prepared-metadata label. Idempotent. Standalone counterpart: `pack image-metadata fix`. |
 | `--lifecycle-image` | Emit-capable lifecycle image (only needed when not using a builder that already bundles it) |
 
 ## Related Repositories
@@ -93,7 +92,7 @@ pack build pack-local-registry:5000/myapp:latest \
   --builder jericop/ubuntu-noble-builder:buildkit-native-export \
   --run-image paketobuildpacks/ubuntu-noble-run:latest \
   --platforms linux/amd64,linux/arm64 \
-  --buildkit --build-backend buildkit \
+  --build-backend buildkit \
   --buildkit-builder pack-multiplatform \
   --publish --trust-builder
 ```
@@ -108,5 +107,5 @@ boundary. Registry cache import/export (`--buildkit-cache-from`/`--buildkit-cach
 
 - Requires a patched lifecycle with `-skip-chown` (the BuildKit LLB API doesn't support uid/gid on cache mounts). It is bundled in `jericop/ubuntu-noble-builder:buildkit-native-export`.
 - `pack builder create` with a `docker://` lifecycle URI requires the pack fork (stable pack doesn't support it).
-- Layer diffIDs differ from a normal registry-mode build (BuildKit recomputes them); the post-push FINALIZE step is REQUIRED for rebuild/rebase (it authors the CNB metadata from the produced diffIDs). If finalize fails, the pushed image is runnable but not rebuildable/rebaseable until finalized (re-run the build, or the PLANNED self-healing `--buildkit-fix-image-metadata`).
+- Layer diffIDs differ from a normal registry-mode build (BuildKit recomputes them); the post-push FINALIZE step is REQUIRED for rebuild/rebase (it authors the CNB metadata from the produced diffIDs). If finalize fails, the pushed image is runnable but not rebuildable/rebaseable until finalized (re-run the build, run `pack build --fix-image-metadata`, or run `pack image-metadata fix`).
 - Local ephemeral registries are only reachable from the `docker-container` builder if it was created on a shared docker network (reference the registry by container name from inside the builder, e.g. `pack-local-registry:5000`, and remap to the host `localhost:5050` via `PACK_HOST_REGISTRY_REMAP` for host-side finalize).

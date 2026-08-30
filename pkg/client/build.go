@@ -179,21 +179,17 @@ type BuildOptions struct {
 	Platform string
 
 	// Platforms specifies multiple target platforms for multi-architecture builds
-	// (e.g., "linux/amd64,linux/arm64"). When set, the build uses BuildKit to produce
-	// per-architecture images and assembles them into a manifest list.
-	// Requires --buildkit flag to be set. Requires --publish or an output directory.
+	// (e.g., "linux/amd64,linux/arm64"). When set, the build uses the native backend
+	// to produce per-architecture images and assembles them into a manifest list.
+	// Requires BuildBackend to be set. Requires --publish or an output directory.
 	// Mutually exclusive with Platform.
 	Platforms string
 
-	// Buildkit enables the BuildKit execution backend. This is required for multi-platform
-	// builds and can also be used for single-platform builds to take advantage of BuildKit
-	// caching and features. This is an experimental feature.
-	Buildkit bool
-
-	// BuildBackend specifies which multi-platform build backend to use.
-	// Valid values: "auto" (default) and "buildkit"; both resolve to the buildkit
-	// backend today. The abstraction is retained for a future buildah-podman
-	// backend. Can also be set via PACK_BUILD_BACKEND environment variable.
+	// BuildBackend selects the native build backend and, by being set, opts into the
+	// native (multi-platform, build-then-finalize) build path. An empty value uses
+	// the standard single-arch build. Valid values: "auto" and "buildkit"; both
+	// resolve to the BuildKit backend today. The abstraction is retained for a
+	// future buildah backend. This is an experimental feature.
 	BuildBackend string
 
 	// BuildkitBuilder specifies the name of the buildx builder to use for multi-platform builds.
@@ -864,11 +860,11 @@ func (c *Client) Build(ctx context.Context, opts BuildOptions) error {
 		return ephemeralRunImageName, nil
 	}
 
-	// Multi-platform build routing: if --buildkit is enabled, use the buildkit executor.
-	// --platforms requires --buildkit to be set explicitly.
-	if opts.Buildkit {
+	// Native build routing: setting BuildBackend opts into the native (multi-platform,
+	// build-then-finalize) path. --platforms requires BuildBackend to be set.
+	if opts.BuildBackend != "" {
 		if opts.Platforms == "" {
-			// Single-platform buildkit build — use the current platform
+			// Single-platform native build — use the current platform
 			opts.Platforms = opts.Platform
 			if opts.Platforms == "" {
 				// Default to the builder's platform
@@ -883,7 +879,7 @@ func (c *Client) Build(ctx context.Context, opts BuildOptions) error {
 	}
 
 	if opts.Platforms != "" {
-		return fmt.Errorf("--platforms requires --buildkit flag to be set (experimental feature)")
+		return fmt.Errorf("--platforms requires --build-backend to be set (experimental feature)")
 	}
 
 	if err = c.lifecycleExecutor.Execute(ctx, lifecycleOpts); err != nil {

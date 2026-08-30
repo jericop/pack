@@ -108,7 +108,7 @@ build_cmd() {
     --builder jericop/ubuntu-noble-builder:buildkit-native-export \
     --run-image paketobuildpacks/ubuntu-noble-run-tiny:latest \
     --platforms linux/amd64,linux/arm64 \
-    --buildkit --build-backend buildkit \
+    --build-backend buildkit \
     --buildkit-builder pack-multiplatform \
     --publish --trust-builder --verbose
 }
