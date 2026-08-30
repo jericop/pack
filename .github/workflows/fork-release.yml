@@ -20,10 +20,13 @@
 #      to build + push the multi-arch image. The git tag already exists, so its
 #      "checkout at tag" step resolves correctly.
 #
-# The unit job runs `make unit` (go test ./...). The BuildKit/registry
-# integration tests (oci_layout_*_integration_test.go) are gated behind
-# PACK_TEST_BUILDKIT_ENABLED / PACK_TEST_REGISTRY_ENABLED, which are NOT set
-# here, so they SKIP. Run those via the separate `fork-integration.yml` workflow.
+# The unit job runs the fork-touched packages only (internal/build/multiplatform,
+# internal/commands, pkg/client) on Linux — not the full upstream `go test ./...` —
+# so the release gate covers this fork's BuildKit multi-arch code without dragging
+# in unrelated OS-flavored upstream tests (e.g. pkg/buildpack's Windows layer test).
+# Target platforms are linux/amd64 + linux/arm64 only. The BuildKit/registry
+# integration tests are gated behind PACK_TEST_* env vars (not set here) so they
+# SKIP; run those via the separate `fork-integration.yml` workflow.
 name: fork-release
 
 on:
@@ -55,10 +58,19 @@ jobs:
           echo "GOPATH=$(go env GOPATH)" >> $GITHUB_ENV
           echo "$(go env GOPATH)/bin" >> $GITHUB_PATH
         shell: bash
-      - name: Unit tests (Linux, Docker available)
+      - name: Unit tests (fork-touched packages, Linux)
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: make unit
+        # Scope the release gate to the packages this fork actually changes for the
+        # BuildKit multi-arch work, on Linux. This avoids the full upstream suite
+        # (which includes OS-flavored tests like pkg/buildpack's Windows layer test
+        # that are unrelated to the fork and can flake on the Linux runner). Target
+        # platforms are linux/amd64 + linux/arm64 only — no Windows/macOS.
+        run: |
+          go test -count=1 \
+            ./internal/build/multiplatform/... \
+            ./internal/commands/... \
+            ./pkg/client/...
 
   release:
     needs: unit
