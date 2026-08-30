@@ -134,8 +134,11 @@ func (b *BuildkitBackend) driveNative(ctx context.Context, bkClient *client.Clie
 		platformAPI:  opts.PlatformAPI,
 		uid:          opts.BuilderUID,
 		gid:          opts.BuilderGID,
-		orderTOML:    opts.OrderToml,
-		registryAuth: opts.RegistryAuth,
+		orderTOML:           opts.OrderToml,
+		registryAuth:        opts.RegistryAuth,
+		stackID:             opts.StackID,
+		targetDistroName:    opts.TargetDistroName,
+		targetDistroVersion: opts.TargetDistroVersion,
 	}
 	if reg := registryHost(opts.ImageName); reg != "" && isLikelyInsecureRegistry(reg) {
 		in.insecureRegistries = []string{reg}

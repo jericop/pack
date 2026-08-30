@@ -49,6 +49,12 @@ type nativeBuildInputs struct {
 	imageName          string
 	insecureRegistries []string
 	platforms          []ocispecs.Platform
+	// stackID + target distro are advertised to the lifecycle/buildpacks so postal
+	// dependency resolution picks stack/target-specific PREBUILT dependencies rather
+	// than falling back to a wildcard-stack SOURCE build. Read from the builder image.
+	stackID             string
+	targetDistroName    string
+	targetDistroVersion string
 }
 
 // contextLocalName is the llb.Local key under which pack provides the app source.
@@ -415,8 +421,29 @@ func buildEmitLLB(in nativeBuildInputs, p ocispecs.Platform) llb.State {
 		llb.AddEnv("CNB_PLATFORM_API", in.platformAPI),
 		llb.AddEnv("CNB_USER_ID", fmt.Sprintf("%d", in.uid)),
 		llb.AddEnv("CNB_GROUP_ID", fmt.Sprintf("%d", in.gid)),
+		// Advertise the TARGET os/arch to the lifecycle + buildpacks. Without these,
+		// packit's postal dependency resolver (used by buildpacks like cpython) falls
+		// back to runtime.GOOS/GOARCH, and — more importantly — combined with a missing
+		// CNB_STACK_ID it filters out stack/target-specific PREBUILT dependencies and
+		// selects the wildcard-stack SOURCE dependency instead, forcing a
+		// compile-from-source (e.g. CPython built from source, ~90s) instead of
+		// extracting a prebuilt binary. Set both the modern target vars and the stack id.
+		llb.AddEnv("CNB_TARGET_OS", p.OS),
+		llb.AddEnv("CNB_TARGET_ARCH", p.Architecture),
 		llb.User(cnbUser),
 		llb.Network(pb.NetMode_HOST),
+	}
+	if p.Variant != "" {
+		env = append(env, llb.AddEnv("CNB_TARGET_ARCH_VARIANT", p.Variant))
+	}
+	if in.stackID != "" {
+		env = append(env, llb.AddEnv("CNB_STACK_ID", in.stackID))
+	}
+	if in.targetDistroName != "" {
+		env = append(env, llb.AddEnv("CNB_TARGET_DISTRO_NAME", in.targetDistroName))
+	}
+	if in.targetDistroVersion != "" {
+		env = append(env, llb.AddEnv("CNB_TARGET_DISTRO_VERSION", in.targetDistroVersion))
 	}
 	if in.registryAuth != "" {
 		env = append(env, llb.AddEnv("CNB_REGISTRY_AUTH", in.registryAuth))

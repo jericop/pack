@@ -194,6 +194,16 @@ type PlatformBuildOpts struct {
 	// Contains pre-resolved auth headers for registries, eliminating the need for
 	// docker config file mounts inside buildkit.
 	RegistryAuth string
+	// StackID is the builder's CNB stack id (io.buildpacks.stack.id). It is advertised
+	// to the lifecycle/buildpacks as CNB_STACK_ID so buildpack dependency resolution
+	// (packit postal) can select stack-specific PREBUILT dependencies instead of
+	// falling back to wildcard-stack SOURCE builds (e.g. compiling CPython).
+	StackID string
+	// TargetDistroName / TargetDistroVersion are the builder's OS distro (e.g. ubuntu
+	// / 24.04), advertised as CNB_TARGET_DISTRO_NAME / CNB_TARGET_DISTRO_VERSION for
+	// the same reason.
+	TargetDistroName    string
+	TargetDistroVersion string
 }
 
 // PlatformBuildResult describes the outcome of building for a single platform.

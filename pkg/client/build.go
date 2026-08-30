@@ -941,6 +941,12 @@ func (c *Client) buildMultiPlatform(ctx context.Context, opts BuildOptions, life
 		OrderToml:        orderToml,
 		ClearCache:       opts.ClearCache,
 		RegistryAuth:     buildRegistryAuth(c.keychain, lifecycleOpts),
+		// Advertise the builder's stack id + OS distro to the lifecycle/buildpacks so
+		// buildpack dependency resolution can pick stack/target-specific PREBUILT
+		// dependencies instead of compiling from source (see native_buildfunc env).
+		StackID:             builderImageLabel(lifecycleOpts.Builder.Image(), "io.buildpacks.stack.id"),
+		TargetDistroName:    builderDistroLabel(lifecycleOpts.Builder.Image(), "name"),
+		TargetDistroVersion: builderDistroLabel(lifecycleOpts.Builder.Image(), "version"),
 	}
 
 	// If the user explicitly passed --lifecycle-image, use it regardless of trust mode
@@ -1274,6 +1280,34 @@ func usesContainerdStorage(docker DockerClient) bool {
 	}
 
 	return false
+}
+
+// builderImageLabel reads a single label off the builder image, returning "" on
+// error or when absent.
+func builderImageLabel(img imgutil.Image, key string) string {
+	if img == nil {
+		return ""
+	}
+	if v, err := img.Label(key); err == nil {
+		return v
+	}
+	return ""
+}
+
+// builderDistroLabel reads the builder's OS distro name/version from its image
+// labels, trying the modern "io.buildpacks.base.distro.*" label first and falling
+// back to the older "io.buildpacks.stack.distro.*". Returns "" if unavailable
+// (distro is advisory for dependency resolution; the stack id is the primary key).
+func builderDistroLabel(img imgutil.Image, which string) string {
+	for _, key := range []string{
+		"io.buildpacks.base.distro." + which,
+		"io.buildpacks.stack.distro." + which,
+	} {
+		if v := builderImageLabel(img, key); v != "" {
+			return v
+		}
+	}
+	return ""
 }
 
 func getTargetFromBuilder(builderImage imgutil.Image) (*dist.Target, error) {
