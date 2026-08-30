@@ -283,6 +283,41 @@ working over time, not just the first cycle.
 5. Verification SHALL exercise REPEATED cycles (≥2 rebuilds; ≥2 rebases; rebuild
    after rebase), confirming correctness each time.
 
+### Requirement 11: Build environment parity with standard pack
+
+**User Story:** As a developer, I want the buildkit backend to provide the same
+build environment that standard pack provides — the CNB platform variables the
+lifecycle/buildpacks require, my own build-time env vars, and proxy settings — so
+that buildpacks detect, resolve dependencies, and are configured identically to a
+normal `pack build`.
+
+#### Acceptance Criteria
+
+1. THE backend SHALL set the CNB platform environment on the lifecycle phases:
+   `CNB_PLATFORM_API`, `CNB_USER_ID`, `CNB_GROUP_ID`, `CNB_STACK_ID`,
+   `CNB_TARGET_OS`, `CNB_TARGET_ARCH`, and (WHERE the target defines them)
+   `CNB_TARGET_ARCH_VARIANT`, `CNB_TARGET_DISTRO_NAME`, `CNB_TARGET_DISTRO_VERSION`.
+2. WHERE experimental mode is enabled, THE backend SHALL set `CNB_EXPERIMENTAL_MODE`;
+   WHERE a creation time is configured, THE backend SHALL set `SOURCE_DATE_EPOCH`.
+3. THE `CNB_STACK_ID` and `CNB_TARGET_*` values SHALL be sourced from the builder
+   image (stack id + OS distro labels) and the per-platform target, so that a
+   buildpack's dependency resolver selects stack/target-specific PREBUILT
+   dependencies instead of falling back to a wildcard-stack SOURCE build. (Concretely:
+   without these, the CPython buildpack compiled CPython from source; with them it
+   installs a prebuilt binary.)
+4. THE backend SHALL pass user build-time environment — `pack --env` / `--env-file`
+   and project descriptor `[[build.env]]` — to buildpacks by writing each variable as
+   a file under `/platform/env/<NAME>` (the CNB platform contract), so `BP_*`
+   configuration (e.g. `BP_CPYTHON_VERSION`, `BP_JVM_VERSION`) takes effect exactly as
+   with standard pack. Project-descriptor env SHALL be applied first and `--env` /
+   `--env-file` SHALL override it.
+5. THE backend SHALL propagate proxy configuration — `HTTP_PROXY`, `HTTPS_PROXY`,
+   `NO_PROXY` (both upper and lower case) — resolved from explicit options or the host
+   environment, matching standard pack's lifecycle-proxy behavior.
+6. THE backend SHALL NOT set variables that do not apply to a publish-only,
+   registry-export backend (`CNB_USE_LAYOUT` / `CNB_LAYOUT_DIR`, which are for local
+   OCI-layout export only).
+
 ### Requirement 10: Self-healing (DEFERRED — after MVP)
 
 **User Story:** As a CI/CD operator, I want a way to detect and fix an image whose

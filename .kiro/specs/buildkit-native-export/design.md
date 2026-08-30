@@ -116,6 +116,35 @@ per platform:
 
 `NativeBackend` then calls `finalize.Finalize` (Phase 2). `Capabilities().PushesNatively = true`.
 
+### Build environment (parity with standard pack) — Requirement 11
+
+Because the lifecycle runs inside BuildKit (not in a pack-managed container), the
+BuildFunc must reproduce the environment standard pack provides. Threaded as
+`PlatformBuildOpts` → `nativeBuildInputs` and applied in `buildEmitLLB`:
+
+- **CNB platform env** on every lifecycle RUN (process env via `llb.AddEnv`):
+  `CNB_PLATFORM_API`, `CNB_USER_ID`, `CNB_GROUP_ID`, `CNB_STACK_ID`, `CNB_TARGET_OS`,
+  `CNB_TARGET_ARCH`, `CNB_TARGET_ARCH_VARIANT` (if any), `CNB_TARGET_DISTRO_NAME`,
+  `CNB_TARGET_DISTRO_VERSION`, `CNB_EXPERIMENTAL_MODE` (when experimental),
+  `SOURCE_DATE_EPOCH` (when a creation time is set), `CNB_REGISTRY_AUTH`. The
+  target/stack values are sourced in `pkg/client/build.go` (`buildMultiPlatform`)
+  from the builder image labels (`io.buildpacks.stack.id`,
+  `io.buildpacks.base|stack.distro.{name,version}`) and the per-platform target.
+  Rationale: `CNB_STACK_ID` + the target vars are what let packit's `postal` resolver
+  match stack/target-specific PREBUILT dependencies; without them a buildpack falls
+  back to a wildcard-stack SOURCE build (observed: CPython compiled from source ~90s
+  vs prebuilt ~10s).
+- **User build env** — `--env` / `--env-file` + project descriptor `[[build.env]]`
+  (merged, `--env` wins) — written as files `/platform/env/<NAME>` in the LLB (one
+  `llb.Mkfile` per var, deterministic key order for cache stability). This is the CNB
+  platform contract the lifecycle build phase reads to expose `BP_*` config to
+  buildpacks. Mirrors standard pack's builder env layer (`envLayer` →
+  `/platform/env`).
+- **Proxy env** — `HTTP_PROXY`/`HTTPS_PROXY`/`NO_PROXY` (upper + lower case), resolved
+  via `Client.processProxyConfig` (explicit opts else host env), matching
+  `WithLifecycleProxy`.
+- **Not set** (N/A for publish-only): `CNB_USE_LAYOUT` / `CNB_LAYOUT_DIR`.
+
 ### Build-metadata label (contract with the lifecycle)
 
 `io.buildpacks.buildkit.native.build-metadata` — a JSON image label carrying the
