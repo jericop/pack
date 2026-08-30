@@ -16,7 +16,10 @@ can be added without reworking the abstraction.
 
 > The canonical summary of this feature lives in the `buildkit-multiarch` steering
 > file (`.kiro/steering/buildkit-multiarch.md`); it is the source of truth. This
-> file is the expanded reference and is kept in sync with it.
+> file is the expanded technical reference and is kept in sync with it. For a
+> hands-on user walkthrough (consume the published images, build a multi-arch app,
+> make your own builder, run it in CI), see
+> [TRY-IT-OUT.md](./TRY-IT-OUT.md).
 
 ## How It Works: build-then-finalize
 
