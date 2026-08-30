@@ -147,9 +147,16 @@ func (b *BuildkitBackend) driveNative(ctx context.Context, bkClient *client.Clie
 		LocalMounts: map[string]fsutil.FS{
 			contextLocalName: appFS,
 		},
-		Session:      []session.Attachable{authProvider},
-		CacheImports: b.parseCacheImports(),
-		CacheExports: b.parseCacheExports(),
+		Session: []session.Attachable{authProvider},
+		// FrontendAttrs MUST be non-nil: BuildKit's client.solve does
+		// `maps.Copy(maps.Clone(opt.FrontendAttrs), cacheOpt.frontendAttrs)`, and
+		// when CacheImports is set (--buildkit-cache-from) it writes "cache-imports"
+		// into that map. maps.Clone(nil) returns nil, so a nil FrontendAttrs panics
+		// ("assignment to entry in nil map") on the cache-from path. An empty map
+		// avoids the panic and is otherwise a no-op for our gateway build.
+		FrontendAttrs: map[string]string{},
+		CacheImports:  b.parseCacheImports(),
+		CacheExports:  b.parseCacheExports(),
 		// Request the network.host entitlement so the lifecycle phase RUNs (which
 		// run on the builder's host network to reach registries the builder is
 		// attached to) are permitted. The builder must also be started with
