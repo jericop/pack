@@ -1,0 +1,274 @@
+name: benchmark (dockerfile vs buildpacks)
+
+# Multi-arch build-performance comparison: buildpacks (buildkit backend) vs plain
+# Dockerfiles, all built through BuildKit so the comparison isolates "buildpacks
+# overhead" from "BuildKit overhead". Every cell runs on its OWN clean runner (true
+# cold cache), builds linux/amd64+linux/arm64, and is pushed. Times cold + rebuild
+# only (no rebase). An aggregation job prints the combined table as RAW MARKDOWN.
+#
+# Matrix = app × build-type:
+#   * buildpacks-multi            : pack build --build-backend buildkit (multi-arch)
+#   * cnb-like-dockerfile-multi   : a Dockerfile that mirrors what the buildpacks do
+#                                   (ubuntu base; download the runtime — Go dist /
+#                                   Node / JRE — from its web release and install it)
+#   * generic-dockerfile-multi    : a standard idiomatic Dockerfile (ubuntu base,
+#                                   toolchain via apt) — the "what most people write"
+#                                   baseline.
+#
+# Dockerfiles live in the pack repo under
+# internal/build/multiplatform/benchmarks/dockerfiles/<app-id>.<variant>.Dockerfile.
+#
+# Manual only (workflow_dispatch): this is an on-demand comparison, not a per-push
+# gate. It does NOT replace benchmark-perf.yml — that workflow is the primary
+# per-push perf benchmark and is left untouched.
+#
+# NOTE: python/poetry is intentionally omitted for now (its multi-arch cold build is
+# ~40 min under QEMU); the app entry + Dockerfiles exist and can be re-added once an
+# initial run with the faster languages is confirmed. java/java-node is out of scope
+# for this comparison.
+
+on:
+  workflow_dispatch:
+    inputs:
+      pack_ref:
+        description: "pack fork git ref to build pack + read Dockerfiles from"
+        required: false
+        default: "buildkit-native-export"
+      builder:
+        description: "Builder image (buildpacks cells only)"
+        required: false
+        default: "jericop/ubuntu-noble-builder:buildkit-native-export"
+      run_image:
+        description: "Run image (buildpacks cells only)"
+        required: false
+        default: "paketobuildpacks/ubuntu-noble-run:latest"
+      samples_repo:
+        description: "Samples repo (org/name), <lang>/<app> layout"
+        required: false
+        default: "paketo-buildpacks/samples"
+
+env:
+  PACK_REF: ${{ github.event.inputs.pack_ref || 'buildkit-native-export' }}
+  BUILDER: ${{ github.event.inputs.builder || 'jericop/ubuntu-noble-builder:buildkit-native-export' }}
+  RUN_IMAGE: ${{ github.event.inputs.run_image || 'paketobuildpacks/ubuntu-noble-run:latest' }}
+  SAMPLES_REPO: ${{ github.event.inputs.samples_repo || 'paketo-buildpacks/samples' }}
+  MULTI_PLATFORMS: linux/amd64,linux/arm64
+  DOCKERFILE_BASE: ubuntu:noble
+
+jobs:
+  bench:
+    name: "${{ matrix.app.id }} / ${{ matrix.build_type }}"
+    strategy:
+      fail-fast: false
+      matrix:
+        app:
+          - { name: go/mod,     id: go-mod }
+          - { name: nodejs/npm, id: nodejs-npm }
+          - { name: java/maven, id: java-maven }
+          # python/poetry omitted for now (see header note); re-add when ready:
+          # - { name: python/poetry, id: python-poetry }
+        build_type: [buildpacks-multi, cnb-like-dockerfile-multi, generic-dockerfile-multi]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout samples
+        uses: actions/checkout@v5
+        with:
+          repository: ${{ env.SAMPLES_REPO }}
+          path: samples
+
+      - name: Checkout pack source (pack binary + Dockerfiles)
+        uses: actions/checkout@v5
+        with:
+          repository: jericop/pack
+          ref: ${{ env.PACK_REF }}
+          path: pack-src
+
+      - name: Set up Go
+        if: ${{ matrix.build_type == 'buildpacks-multi' }}
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: pack-src/go.mod
+
+      - name: Build pack from source
+        if: ${{ matrix.build_type == 'buildpacks-multi' }}
+        run: |
+          cd pack-src
+          go build -o "${GITHUB_WORKSPACE}/pack-bin" .
+          chmod +x "${GITHUB_WORKSPACE}/pack-bin"
+          "${GITHUB_WORKSPACE}/pack-bin" version
+          "${GITHUB_WORKSPACE}/pack-bin" config experimental true
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Create buildx builder
+        run: docker buildx create --name pack-multiplatform --driver docker-container --bootstrap --use
+
+      - name: Login to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKER_USERNAME }}
+          password: ${{ secrets.DOCKER_PASSWORD }}
+
+      # Warm up base images so image pull is excluded from the timed builds.
+      # buildpacks: seed the CNB builder + run images. dockerfiles: seed ubuntu base.
+      - name: Warm up images (excluded from timings)
+        run: |
+          if [ "${{ matrix.build_type }}" = "buildpacks-multi" ]; then
+            seed="$(mktemp -d)"
+            printf 'FROM %s AS b\nFROM %s AS r\n' "$BUILDER" "$RUN_IMAGE" > "$seed/Dockerfile"
+            docker buildx build --builder pack-multiplatform --platform "$MULTI_PLATFORMS" --output=type=cacheonly "$seed"
+            rm -rf "$seed"
+          else
+            seed="$(mktemp -d)"
+            printf 'FROM %s\n' "$DOCKERFILE_BASE" > "$seed/Dockerfile"
+            docker buildx build --builder pack-multiplatform --platform "$MULTI_PLATFORMS" --output=type=cacheonly "$seed"
+            rm -rf "$seed"
+          fi
+
+      - name: Resolve paths
+        id: cmd
+        run: |
+          app_path="${GITHUB_WORKSPACE}/samples/${{ matrix.app.name }}"
+          if [ ! -d "$app_path" ]; then
+            echo "app path not found: $app_path (is SAMPLES_REPO=$SAMPLES_REPO using the <lang>/<app> layout?)" >&2
+            ls -1 "${GITHUB_WORKSPACE}/samples" >&2 || true
+            exit 1
+          fi
+          df_dir="${GITHUB_WORKSPACE}/pack-src/internal/build/multiplatform/benchmarks/dockerfiles"
+          echo "app_path=$app_path" >> "$GITHUB_OUTPUT"
+          echo "bp_img=${{ secrets.DOCKERHUB_ORG }}/dfbp-bp-${{ matrix.app.id }}-${{ github.run_id }}:latest" >> "$GITHUB_OUTPUT"
+          echo "cnblike_img=${{ secrets.DOCKERHUB_ORG }}/dfbp-cnblike-${{ matrix.app.id }}-${{ github.run_id }}:latest" >> "$GITHUB_OUTPUT"
+          echo "generic_img=${{ secrets.DOCKERHUB_ORG }}/dfbp-generic-${{ matrix.app.id }}-${{ github.run_id }}:latest" >> "$GITHUB_OUTPUT"
+          echo "cnblike_df=$df_dir/${{ matrix.app.id }}.cnb-like.Dockerfile" >> "$GITHUB_OUTPUT"
+          echo "generic_df=$df_dir/${{ matrix.app.id }}.generic.Dockerfile" >> "$GITHUB_OUTPUT"
+
+      # ---------------- buildpacks-multi ----------------
+      - name: "cold build (buildpacks)"
+        id: bp_cold
+        if: ${{ matrix.build_type == 'buildpacks-multi' }}
+        run: |
+          s=$(date +%s.%N)
+          "${GITHUB_WORKSPACE}/pack-bin" build "${{ steps.cmd.outputs.bp_img }}" \
+            --path "${{ steps.cmd.outputs.app_path }}" --builder "$BUILDER" --run-image "$RUN_IMAGE" \
+            --platform linux/amd64 --platform linux/arm64 \
+            --build-backend buildkit --buildkit-builder pack-multiplatform --publish --trust-builder
+          e=$(date +%s.%N)
+          echo "seconds=$(awk -v s=$s -v e=$e 'BEGIN{printf "%.2f", e-s}')" >> "$GITHUB_OUTPUT"
+
+      - name: "rebuild (buildpacks)"
+        id: bp_rebuild
+        if: ${{ matrix.build_type == 'buildpacks-multi' }}
+        run: |
+          s=$(date +%s.%N)
+          "${GITHUB_WORKSPACE}/pack-bin" build "${{ steps.cmd.outputs.bp_img }}" \
+            --path "${{ steps.cmd.outputs.app_path }}" --builder "$BUILDER" --run-image "$RUN_IMAGE" \
+            --platform linux/amd64 --platform linux/arm64 \
+            --build-backend buildkit --buildkit-builder pack-multiplatform --publish --trust-builder
+          e=$(date +%s.%N)
+          echo "seconds=$(awk -v s=$s -v e=$e 'BEGIN{printf "%.2f", e-s}')" >> "$GITHUB_OUTPUT"
+
+      # ---------------- cnb-like-dockerfile-multi ----------------
+      - name: "cold build (cnb-like dockerfile)"
+        id: cnblike_cold
+        if: ${{ matrix.build_type == 'cnb-like-dockerfile-multi' }}
+        run: |
+          s=$(date +%s.%N)
+          docker buildx build --builder pack-multiplatform --platform "$MULTI_PLATFORMS" \
+            -f "${{ steps.cmd.outputs.cnblike_df }}" -t "${{ steps.cmd.outputs.cnblike_img }}" \
+            --no-cache --push "${{ steps.cmd.outputs.app_path }}"
+          e=$(date +%s.%N)
+          echo "seconds=$(awk -v s=$s -v e=$e 'BEGIN{printf "%.2f", e-s}')" >> "$GITHUB_OUTPUT"
+
+      - name: "rebuild (cnb-like dockerfile)"
+        id: cnblike_rebuild
+        if: ${{ matrix.build_type == 'cnb-like-dockerfile-multi' }}
+        run: |
+          s=$(date +%s.%N)
+          docker buildx build --builder pack-multiplatform --platform "$MULTI_PLATFORMS" \
+            -f "${{ steps.cmd.outputs.cnblike_df }}" -t "${{ steps.cmd.outputs.cnblike_img }}" \
+            --push "${{ steps.cmd.outputs.app_path }}"
+          e=$(date +%s.%N)
+          echo "seconds=$(awk -v s=$s -v e=$e 'BEGIN{printf "%.2f", e-s}')" >> "$GITHUB_OUTPUT"
+
+      # ---------------- generic-dockerfile-multi ----------------
+      - name: "cold build (generic dockerfile)"
+        id: generic_cold
+        if: ${{ matrix.build_type == 'generic-dockerfile-multi' }}
+        run: |
+          s=$(date +%s.%N)
+          docker buildx build --builder pack-multiplatform --platform "$MULTI_PLATFORMS" \
+            -f "${{ steps.cmd.outputs.generic_df }}" -t "${{ steps.cmd.outputs.generic_img }}" \
+            --no-cache --push "${{ steps.cmd.outputs.app_path }}"
+          e=$(date +%s.%N)
+          echo "seconds=$(awk -v s=$s -v e=$e 'BEGIN{printf "%.2f", e-s}')" >> "$GITHUB_OUTPUT"
+
+      - name: "rebuild (generic dockerfile)"
+        id: generic_rebuild
+        if: ${{ matrix.build_type == 'generic-dockerfile-multi' }}
+        run: |
+          s=$(date +%s.%N)
+          docker buildx build --builder pack-multiplatform --platform "$MULTI_PLATFORMS" \
+            -f "${{ steps.cmd.outputs.generic_df }}" -t "${{ steps.cmd.outputs.generic_img }}" \
+            --push "${{ steps.cmd.outputs.app_path }}"
+          e=$(date +%s.%N)
+          echo "seconds=$(awk -v s=$s -v e=$e 'BEGIN{printf "%.2f", e-s}')" >> "$GITHUB_OUTPUT"
+
+      - name: Write per-cell result row
+        if: ${{ always() }}
+        run: |
+          mkdir -p rows
+          cold="${{ steps.bp_cold.outputs.seconds }}${{ steps.cnblike_cold.outputs.seconds }}${{ steps.generic_cold.outputs.seconds }}"
+          rebuild="${{ steps.bp_rebuild.outputs.seconds }}${{ steps.cnblike_rebuild.outputs.seconds }}${{ steps.generic_rebuild.outputs.seconds }}"
+          # CSV: app,build_type,cold,rebuild
+          echo "${{ matrix.app.name }},${{ matrix.build_type }},${cold},${rebuild}" > "rows/${{ matrix.app.id }}-${{ matrix.build_type }}.csv"
+          cat "rows/${{ matrix.app.id }}-${{ matrix.build_type }}.csv"
+
+      - name: Upload row
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: dfbp-row-${{ matrix.app.id }}-${{ matrix.build_type }}
+          path: rows/${{ matrix.app.id }}-${{ matrix.build_type }}.csv
+
+  aggregate:
+    needs: bench
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download all rows
+        uses: actions/download-artifact@v4
+        with:
+          pattern: dfbp-row-*
+          path: rows
+          merge-multiple: true
+
+      - name: Assemble + print the comparison table (raw markdown)
+        run: |
+          {
+            echo "# Multi-arch: buildpacks vs Dockerfiles (both via BuildKit)"
+            echo
+            echo "Each cell built on its own clean runner (cold cache), \`${MULTI_PLATFORMS}\`, pushed."
+            echo "buildpacks builder: \`${BUILDER}\`; Dockerfiles base: \`${DOCKERFILE_BASE}\`."
+            echo "Durations are wall-clock seconds. Cold = --no-cache first build; rebuild = warm cache."
+            echo
+            echo "| App | Build type | Cold (s) | Rebuild (s) |"
+            echo "|-----|------------|---------:|------------:|"
+            for f in $(find rows -name '*.csv' | sort); do
+              IFS=, read -r app bt cold rebuild < "$f"
+              echo "| \`$app\` | $bt | ${cold:-—} | ${rebuild:-—} |"
+            done
+          } | tee table.md
+          echo
+          echo "===== RAW MARKDOWN (copy below) ====="
+          cat table.md
+          cat table.md >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload combined table
+        uses: actions/upload-artifact@v4
+        with:
+          name: dfbp-comparison-table
+          path: table.md
