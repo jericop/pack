@@ -17,7 +17,10 @@ on:
 
 env:
   REGISTRY_NAME: 'docker.io'
-  USER_NAME: 'buildpacksio'
+  # Docker Hub org/user to publish the pack image under. Configurable via the
+  # DOCKERHUB_ORG repository/environment variable; defaults to 'jericop' for this
+  # fork. Upstream publishes to 'buildpacksio'.
+  DOCKERHUB_ORG: ${{ vars.DOCKERHUB_ORG || 'jericop' }}
   IMG_NAME: 'pack'
 
 jobs:
@@ -47,13 +50,20 @@ jobs:
               throw "ERROR: unable to determine tag";
             }
 
+            // The git tag to check out is the tag verbatim. The docker image tag
+            // is derived from it:
+            //   classic:       v0.0.1-buildkit-poc      -> image tag 0.0.1-buildkit-poc
+            //   feature-line:  buildkit-native-export-v0.1.0 -> image tag buildkit-native-export-v0.1.0
+            // We only strip a SINGLE leading v (classic scheme); the feature-line
+            // tag has no leading v, so it passes through unchanged.
+            core.setOutput('git_tag', tag);
             return tag.replace(/^v/, '');
       - name: Checkout source at tag
         uses: actions/checkout@v4
         with:
-          ref: v${{ steps.version.outputs.result }}
+          ref: ${{ steps.version.outputs.git_tag }}
       - name: Determine App Name
-        run: 'echo "IMG_NAME=${{ env.REGISTRY_NAME }}/${{ env.USER_NAME }}/${{ env.IMG_NAME }}" >> $GITHUB_ENV'
+        run: 'echo "IMG_NAME=${{ env.REGISTRY_NAME }}/${{ env.DOCKERHUB_ORG }}/${{ env.IMG_NAME }}" >> $GITHUB_ENV'
       - name: Login to Dockerhub
         uses: docker/login-action@v3
         with:
@@ -64,9 +74,12 @@ jobs:
       - uses: buildpacks/github-actions/setup-tools@v5.9.4
       - name: Buildx Build/Publish
         run: |
+          # Fork scope: build only the platforms we test on (amd64 + arm64).
+          # The upstream image also ships s390x/ppc64le, but those add slow
+          # emulated builds we don't need for this POC.
           docker buildx build . \
             --tag ${{ env.IMG_NAME }}:${{ steps.version.outputs.result }}${{ matrix.suffix }} \
-            --platform linux/amd64,linux/arm64,linux/s390x,linux/ppc64le \
+            --platform linux/amd64,linux/arm64 \
             --build-arg pack_version=${{ steps.version.outputs.result }} \
             --build-arg base_image=${{ matrix.base_image }} \
             --provenance=false \
