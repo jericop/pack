@@ -1,13 +1,23 @@
 name: Backend comparison benchmark
 
 # Single-arch comparison of the standard docker-daemon build vs the native buildkit
-# backend, across the sample-app matrix, on identical footing (same pack binary,
-# builder, run image; host platform; both --publish). Produces a Markdown/CSV table
-# artifact used by the RFC's performance comparison.
+# backend, on identical footing (same pack binary, builder, run image; host
+# platform; native — no emulation). We measure the BUILD, not the publish: the
+# docker-daemon backend builds to the local daemon; the buildkit backend publishes
+# to Docker Hub (it cannot load a manifest to the daemon).
 #
-# The `pack` binary source is parameterized like buildkit-build.yml:
-#   * DEFAULT: build pack from source at pack_ref.
-#   * OPTIONAL: if pack_image is set, pull it and copy the pack binary out.
+# Structure:
+#   * `compare` job — a MATRIX over apps, so each app runs on its OWN parallel
+#     runner (a clean runner = a genuinely cold environment). Within each job the
+#     four builds (daemon cold, daemon rebuild, buildkit cold, buildkit rebuild)
+#     are SEPARATE, individually-timed steps so their durations show directly in
+#     the GitHub Actions UI (no log scraping). Each job writes a one-row artifact.
+#   * `aggregate` job — collects the per-app rows and prints the combined
+#     comparison table as RAW MARKDOWN (to the log and the run summary) so it can be
+#     copied straight into a README/RFC.
+#
+# The `pack` binary source is parameterized: build from source at pack_ref
+# (default), or pull it out of pack_image when set.
 
 on:
   workflow_dispatch:
@@ -30,10 +40,6 @@ on:
         description: "Run image"
         required: false
         default: "paketobuildpacks/ubuntu-noble-run:latest"
-      apps:
-        description: "Space-separated lang/app list"
-        required: false
-        default: "python/poetry nodejs/npm java/maven java/java-node go/mod"
       samples_repo:
         description: "Samples repo to checkout (org/name)"
         required: false
@@ -44,14 +50,29 @@ env:
   PACK_REF: ${{ github.event.inputs.pack_ref || 'buildkit-native-export' }}
   BUILDER: ${{ github.event.inputs.builder || 'jericop/ubuntu-noble-builder:buildkit-native-export' }}
   RUN_IMAGE: ${{ github.event.inputs.run_image || 'paketobuildpacks/ubuntu-noble-run:latest' }}
-  BENCH_APPS: ${{ github.event.inputs.apps || 'python/poetry nodejs/npm java/maven java/java-node go/mod' }}
   SAMPLES_REPO: ${{ github.event.inputs.samples_repo || 'buildpacks/samples' }}
+  # CI runners are linux/amd64.
+  PLATFORM: linux/amd64
 
 jobs:
   compare:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - app: go/mod
+            id: go-mod
+          - app: nodejs/npm
+            id: nodejs-npm
+          - app: java/maven
+            id: java-maven
+          - app: java/java-node
+            id: java-java-node
+          - app: python/poetry
+            id: python-poetry
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout pack (for the comparison harness)
+      - name: Checkout pack (harness)
         uses: actions/checkout@v5
         with:
           path: pack-repo
@@ -62,7 +83,6 @@ jobs:
           repository: ${{ env.SAMPLES_REPO }}
           path: samples
 
-      # --- pack binary: build-from-source (default) OR copy-out-of-image ---
       - name: Checkout pack source
         if: ${{ env.PACK_IMAGE == '' }}
         uses: actions/checkout@v5
@@ -109,25 +129,132 @@ jobs:
           username: ${{ secrets.DOCKER_USERNAME }}
           password: ${{ secrets.DOCKER_PASSWORD }}
 
-      - name: Run comparison benchmark
-        env:
-          PACK_BIN: ${{ github.workspace }}/pack-bin
-          SAMPLES_DIR: ${{ github.workspace }}/samples
-          OUT_DIR: ${{ github.workspace }}/compare-out
-          # Both backends publish to Docker Hub, which resolves identically from the
-          # runner daemon (docker-daemon backend) and the docker-container buildx
-          # builder (buildkit backend) — no localhost/container-name split, so no
-          # PACK_HOST_REGISTRY_REMAP is needed. Per-app images are pushed under the
-          # DOCKERHUB_ORG namespace as benchmark artifacts.
-          REGISTRY_PUSH: ${{ secrets.DOCKERHUB_ORG }}
-          REGISTRY_HOST: ${{ secrets.DOCKERHUB_ORG }}
-          BUILDKIT_BUILDER: pack-multiplatform
+      # Warm up the builder + run images into BOTH caches so image pull time is
+      # excluded from every timed build below (fair start for both backends).
+      - name: Warm up builder + run images (excluded from timings)
         run: |
-          bash pack-repo/internal/build/multiplatform/benchmarks/compare-backends.sh
+          docker pull --platform "$PLATFORM" "$BUILDER"
+          docker pull --platform "$PLATFORM" "$RUN_IMAGE"
+          seed="$(mktemp -d)"
+          printf 'FROM %s AS b\nFROM %s AS r\n' "$BUILDER" "$RUN_IMAGE" > "$seed/Dockerfile"
+          docker buildx build --builder pack-multiplatform --platform "$PLATFORM" --output=type=cacheonly "$seed"
+          rm -rf "$seed"
 
-      - name: Upload comparison table + logs
+      # --- four separately-timed builds; each records its own duration (seconds) ---
+      # A clean matrix runner means the cold builds are genuinely cold. The daemon
+      # backend builds to the local daemon (measure the build, not a push); the
+      # buildkit backend publishes to Docker Hub under a unique per-run tag.
+
+      - name: "daemon: cold"
+        id: daemon_cold
+        env:
+          IMG: cmp-daemon-${{ matrix.id }}-${{ github.run_id }}:latest
+        run: |
+          s=$(date +%s.%N)
+          "${GITHUB_WORKSPACE}/pack-bin" build "$IMG" \
+            --path "samples/${{ matrix.app }}" \
+            --builder "$BUILDER" --run-image "$RUN_IMAGE" \
+            --platform "$PLATFORM" --trust-builder
+          e=$(date +%s.%N)
+          echo "seconds=$(awk -v s=$s -v e=$e 'BEGIN{printf "%.2f", e-s}')" >> "$GITHUB_OUTPUT"
+
+      - name: "daemon: rebuild"
+        id: daemon_rebuild
+        env:
+          IMG: cmp-daemon-${{ matrix.id }}-${{ github.run_id }}:latest
+        run: |
+          s=$(date +%s.%N)
+          "${GITHUB_WORKSPACE}/pack-bin" build "$IMG" \
+            --path "samples/${{ matrix.app }}" \
+            --builder "$BUILDER" --run-image "$RUN_IMAGE" \
+            --platform "$PLATFORM" --trust-builder
+          e=$(date +%s.%N)
+          echo "seconds=$(awk -v s=$s -v e=$e 'BEGIN{printf "%.2f", e-s}')" >> "$GITHUB_OUTPUT"
+
+      - name: "buildkit: cold"
+        id: buildkit_cold
+        env:
+          IMG: ${{ secrets.DOCKERHUB_ORG }}/cmp-buildkit-${{ matrix.id }}-${{ github.run_id }}:latest
+        run: |
+          s=$(date +%s.%N)
+          "${GITHUB_WORKSPACE}/pack-bin" build "$IMG" \
+            --path "samples/${{ matrix.app }}" \
+            --builder "$BUILDER" --run-image "$RUN_IMAGE" \
+            --platform "$PLATFORM" --build-backend buildkit \
+            --buildkit-builder pack-multiplatform --publish --trust-builder
+          e=$(date +%s.%N)
+          echo "seconds=$(awk -v s=$s -v e=$e 'BEGIN{printf "%.2f", e-s}')" >> "$GITHUB_OUTPUT"
+
+      - name: "buildkit: rebuild"
+        id: buildkit_rebuild
+        env:
+          IMG: ${{ secrets.DOCKERHUB_ORG }}/cmp-buildkit-${{ matrix.id }}-${{ github.run_id }}:latest
+        run: |
+          s=$(date +%s.%N)
+          "${GITHUB_WORKSPACE}/pack-bin" build "$IMG" \
+            --path "samples/${{ matrix.app }}" \
+            --builder "$BUILDER" --run-image "$RUN_IMAGE" \
+            --platform "$PLATFORM" --build-backend buildkit \
+            --buildkit-builder pack-multiplatform --publish --trust-builder
+          e=$(date +%s.%N)
+          echo "seconds=$(awk -v s=$s -v e=$e 'BEGIN{printf "%.2f", e-s}')" >> "$GITHUB_OUTPUT"
+
+      - name: Write per-app result row
+        if: ${{ always() }}
+        run: |
+          mkdir -p rows
+          dc='${{ steps.daemon_cold.outputs.seconds }}'
+          dr='${{ steps.daemon_rebuild.outputs.seconds }}'
+          bc='${{ steps.buildkit_cold.outputs.seconds }}'
+          br='${{ steps.buildkit_rebuild.outputs.seconds }}'
+          # CSV row: app,daemon_cold,daemon_rebuild,buildkit_cold,buildkit_rebuild
+          echo "${{ matrix.app }},${dc:-},${dr:-},${bc:-},${br:-}" > "rows/${{ matrix.id }}.csv"
+          cat "rows/${{ matrix.id }}.csv"
+
+      - name: Upload row
         if: ${{ always() }}
         uses: actions/upload-artifact@v4
         with:
-          name: compare-backends-results
-          path: ${{ github.workspace }}/compare-out
+          name: compare-row-${{ matrix.id }}
+          path: rows/${{ matrix.id }}.csv
+
+  aggregate:
+    needs: compare
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download all rows
+        uses: actions/download-artifact@v4
+        with:
+          pattern: compare-row-*
+          path: rows
+          merge-multiple: true
+
+      - name: Assemble + print the comparison table (raw markdown)
+        run: |
+          {
+            echo "# Single-arch backend comparison — docker-daemon vs buildkit"
+            echo
+            echo "Platform: \`${PLATFORM}\` (native). Builder: \`${BUILDER}\`. Run image: \`${RUN_IMAGE}\`."
+            echo "Durations are wall-clock seconds. Δ = buildkit ÷ daemon (< 1.00x = buildkit faster)."
+            echo
+            echo "| App | daemon cold | daemon rebuild | buildkit cold | buildkit rebuild | cold Δ | rebuild Δ |"
+            echo "|-----|------------:|---------------:|--------------:|-----------------:|-------:|----------:|"
+            for f in $(find rows -name '*.csv' | sort); do
+              IFS=, read -r app dc dr bc br < "$f"
+              cold_d=$(awk -v a="$bc" -v b="$dc" 'BEGIN{ if(b>0) printf "%.2fx", a/b; else printf "n/a" }')
+              reb_d=$(awk -v a="$br" -v b="$dr" 'BEGIN{ if(b>0) printf "%.2fx", a/b; else printf "n/a" }')
+              echo "| \`$app\` | ${dc:-—} | ${dr:-—} | ${bc:-—} | ${br:-—} | ${cold_d} | ${reb_d} |"
+            done
+          } | tee table.md
+          echo
+          echo "===== RAW MARKDOWN (copy below) ====="
+          cat table.md
+          # Also surface it in the run summary.
+          cat table.md >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload combined table
+        uses: actions/upload-artifact@v4
+        with:
+          name: compare-backends-table
+          path: table.md

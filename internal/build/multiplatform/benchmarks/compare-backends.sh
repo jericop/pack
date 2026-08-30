@@ -22,6 +22,14 @@
 # docker-daemon backend builds to the local Docker daemon (its natural mode); the
 # buildkit backend publishes to a registry (it cannot load to the daemon).
 #
+# Fairness controls:
+#   - Builder + run images are WARMED UP once up front (docker pull for the daemon;
+#     a 2-FROM cache-only buildx solve for buildkit) so image pull time is excluded
+#     from every timed build and both backends start from the same warm base state.
+#   - COLD builds are truly cold at the buildpack level: the daemon backend's pack
+#     cache volumes for the image are removed before its cold build. The buildkit
+#     cache is NOT pruned (base images stay warm, matching the daemon).
+#
 # For each app + backend it measures WALL TIME (real elapsed seconds — see the
 # mvp-build-testing-strategy steering doc) of a cold build and a warm rebuild, and
 # emits a side-by-side Markdown + CSV table.
@@ -99,6 +107,55 @@ elapsed() { awk -v s="$1" -v e="$2" 'BEGIN { printf "%.2f", (e - s) }'; }
 speedup() { awk -v c="$1" -v r="$2" 'BEGIN { if (r>0) printf "%.2fx", c/r; else printf "n/a" }'; }
 ratio() { awk -v a="$1" -v b="$2" 'BEGIN { if (b>0) printf "%.2fx", a/b; else printf "n/a" }'; }
 
+# warm_up_images makes the builder + run images available to BOTH backends BEFORE
+# any timed build, so image pull/resolve is NOT counted in the build durations
+# (both backends start from the same warm base-image state — a fair comparison):
+#   - docker daemon: `docker pull` puts them in the local daemon image store.
+#   - buildkit: build a tiny 2-stage Dockerfile (FROM builder / FROM run-image) on
+#     the docker-container builder for the target platform, which pulls those images
+#     into the builder's content cache. We do NOT prune this cache between builds, so
+#     the buildkit base images stay warm just like the daemon's pulled images do.
+warm_up_images() {
+  local log="${LOG_DIR}/warmup-${RUN_TS}.log"
+  echo "==> warming up images (excluded from timings): ${BUILDER}, ${RUN_IMAGE}" | tee "$log"
+  {
+    echo "--- docker pull (daemon store) ---"
+    docker pull --platform "$PLATFORM" "$BUILDER"
+    docker pull --platform "$PLATFORM" "$RUN_IMAGE"
+
+    echo "--- seed buildkit builder cache (2-FROM Dockerfile) ---"
+    local seed_dir; seed_dir="$(mktemp -d)"
+    cat > "${seed_dir}/Dockerfile" <<EOF
+FROM ${BUILDER} AS builder
+FROM ${RUN_IMAGE} AS run
+EOF
+    # --output=type=cacheonly: solve both stages (pulling both images into the
+    # builder's cache) without producing/exporting an image.
+    docker buildx build \
+      --builder "$BUILDKIT_BUILDER" \
+      --platform "$PLATFORM" \
+      --output=type=cacheonly \
+      "$seed_dir"
+    rm -rf "$seed_dir"
+  } >>"$log" 2>&1
+  echo "    warm-up done (log: $log)"
+}
+
+# clean_pack_volumes removes the pack build/launch cache volumes for a given image
+# name so the NEXT daemon build of it is a TRUE cold build (buildpacks re-run, no
+# reused dependency layers). Pack names these `pack-cache-<sanitizedRef>-<hash>.build`
+# / `.launch`; we match on the sanitized image tag, which is unique per run. Only the
+# daemon backend uses these volumes; the buildkit backend does not.
+clean_pack_volumes() {
+  local image="$1"
+  # Sanitized ref pack uses in the volume name: '/' and ':' -> '_'.
+  local san; san="$(echo "$image" | tr '/:' '__')"
+  local vols; vols="$(docker volume ls -q --filter "name=pack-cache-" 2>/dev/null | grep -F "$san" || true)"
+  if [ -n "$vols" ]; then
+    echo "$vols" | xargs -r docker volume rm >/dev/null 2>&1 || true
+  fi
+}
+
 # do_build_daemon runs a standard docker-daemon build (default backend). It builds
 # to the LOCAL DOCKER DAEMON (no --publish) — the natural stock-pack usage; we are
 # measuring the BUILD, not the publish. No cache flags: pack auto-creates and reuses
@@ -137,6 +194,15 @@ run_pair() {
   cold_log="${LOG_DIR}/${tag}-${backend}-cold.log"
   rebuild_log="${LOG_DIR}/${tag}-${backend}-rebuild.log"
 
+  # Ensure a TRUE cold build: the daemon backend caches buildpack layers in pack
+  # volumes, so remove this image's volumes before its cold build. (Base images
+  # stay warm from warm_up_images — we only clear the buildpack/app cache.) The
+  # buildkit backend uses no pack volumes; its base images are already warm and its
+  # cache is intentionally NOT pruned.
+  if [ "$backend" = "daemon" ]; then
+    clean_pack_volumes "$image"
+  fi
+
   s=$(now_s); "do_build_${backend}" "$image" "$app_path" "$cold_log"; rc=$?; e=$(now_s)
   cold=$(elapsed "$s" "$e")
   if [ "$rc" -ne 0 ]; then echo "$cold — — FAIL(cold rc=$rc)"; return 1; fi
@@ -167,6 +233,9 @@ run_pair() {
   echo "|-----|----------------:|-------------------:|---------------:|------------------:|---------------------:|-----------------:|-------------------:|----------------------:|--------|"
 } > "$TABLE_MD"
 echo "app,daemon_cold_s,daemon_rebuild_s,daemon_speedup,buildkit_cold_s,buildkit_rebuild_s,buildkit_speedup,cold_ratio_bk_over_daemon,rebuild_ratio_bk_over_daemon,result" > "$TABLE_CSV"
+
+# ---- warm up images (excluded from all timings) -----------------------------
+warm_up_images
 
 # ---- run the matrix ---------------------------------------------------------
 overall_rc=0
