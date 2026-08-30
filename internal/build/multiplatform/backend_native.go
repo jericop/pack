@@ -215,6 +215,9 @@ func (b *BuildkitBackend) driveNative(ctx context.Context, bkClient *client.Clie
 	if err := finalize.Finalize(ctx, finalizeRef, finalize.Options{
 		Insecure: insecure,
 		Logger:   b.logger,
+		// Authenticate the finalize fetch with pack's keychain (falls back to the
+		// default keychain if nil), so it isn't subject to anonymous pull rate limits.
+		Keychain: opts.Keychain,
 	}); err != nil {
 		return nil, fmt.Errorf("finalizing CNB metadata: %w", err)
 	}

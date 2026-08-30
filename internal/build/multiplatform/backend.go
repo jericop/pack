@@ -9,6 +9,8 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/google/go-containerregistry/pkg/authn"
+
 	"github.com/buildpacks/pack/pkg/logging"
 )
 
@@ -218,6 +220,11 @@ type PlatformBuildOpts struct {
 	HTTPProxy  string
 	HTTPSProxy string
 	NoProxy    string
+	// Keychain is pack's resolved registry auth keychain. The host-side finalize step
+	// uses it to fetch the just-pushed image config/manifest AUTHENTICATED; without it
+	// finalize falls back to anonymous access and can hit registry pull rate limits
+	// (e.g. Docker Hub TOOMANYREQUESTS).
+	Keychain authn.Keychain
 }
 
 // PlatformBuildResult describes the outcome of building for a single platform.

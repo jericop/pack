@@ -979,6 +979,7 @@ func (c *Client) buildMultiPlatform(ctx context.Context, opts BuildOptions, life
 		HTTPProxy:           proxyConfig.HTTPProxy,
 		HTTPSProxy:          proxyConfig.HTTPSProxy,
 		NoProxy:             proxyConfig.NoProxy,
+		Keychain:            c.keychain,
 	}
 
 	// If the user explicitly passed --lifecycle-image, use it regardless of trust mode
