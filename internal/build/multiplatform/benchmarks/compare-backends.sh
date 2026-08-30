@@ -16,8 +16,11 @@
 #     bundles the patched lifecycle — so this also verifies the daemon build is
 #     backward-compatible with that builder),
 #   - the SAME run image,
-#   - both --publish,
 #   - a SINGLE platform = the HOST platform (native, no QEMU emulation).
+#
+# Output target differs by backend (we measure the BUILD, not the publish): the
+# docker-daemon backend builds to the local Docker daemon (its natural mode); the
+# buildkit backend publishes to a registry (it cannot load to the daemon).
 #
 # For each app + backend it measures WALL TIME (real elapsed seconds — see the
 # mvp-build-testing-strategy steering doc) of a cold build and a warm rebuild, and
@@ -31,8 +34,11 @@
 #   PACK_BIN            pack binary to drive                     (pack on PATH)
 #   SAMPLES_DIR         path to the buildpacks/samples checkout  (./samples)
 #   BENCH_APPS          space-separated "lang/app" list          (the 5 defaults)
-#   REGISTRY_PUSH       registry name builds push to             (localhost:5050)
+#   REGISTRY_PUSH       default push registry name (buildkit)    (localhost:5050)
 #   REGISTRY_HOST       host-reachable registry (buildkit finalize) (localhost:5050)
+#   BUILDKIT_REGISTRY_PUSH push name for the buildkit build       (REGISTRY_PUSH)
+#     (split-name local setup: BUILDKIT_REGISTRY_PUSH=pack-local-registry:5000)
+#   NOTE: the docker-daemon backend builds to the local daemon (no push/registry).
 #   PACK_HOST_REGISTRY_REMAP  "pushName=hostName" bridge          (auto if the two differ)
 #   BUILDER             builder image (SAME for both backends)   (jericop/ubuntu-noble-builder:buildkit-native-export)
 #   RUN_IMAGE           run image                                (paketobuildpacks/ubuntu-noble-run:latest)
@@ -48,6 +54,13 @@ SAMPLES_DIR="${SAMPLES_DIR:-./samples}"
 BENCH_APPS="${BENCH_APPS:-python/poetry nodejs/npm java/maven java/java-node go/mod}"
 REGISTRY_PUSH="${REGISTRY_PUSH:-localhost:5050}"
 REGISTRY_HOST="${REGISTRY_HOST:-localhost:5050}"
+# The docker-daemon backend builds to the LOCAL DAEMON (no push), so it needs no
+# registry. The buildkit backend must publish; it solves inside the
+# docker-container builder, so in split-name local setups it uses the in-network
+# registry name (e.g. pack-local-registry:5000) while the host-side finalize reaches
+# the same registry by its host name (REGISTRY_HOST). BUILDKIT_REGISTRY_PUSH
+# defaults to REGISTRY_PUSH for the simple same-name case (CI / Docker Hub).
+BUILDKIT_REGISTRY_PUSH="${BUILDKIT_REGISTRY_PUSH:-$REGISTRY_PUSH}"
 BUILDER="${BUILDER:-jericop/ubuntu-noble-builder:buildkit-native-export}"
 RUN_IMAGE="${RUN_IMAGE:-paketobuildpacks/ubuntu-noble-run:latest}"
 BUILDKIT_BUILDER="${BUILDKIT_BUILDER:-pack-multiplatform}"
@@ -66,10 +79,12 @@ detect_host_platform() {
 }
 PLATFORM="${PLATFORM:-$(detect_host_platform)}"
 
-# Bridge the buildkit-push name to the host-reachable name for the buildkit
+# Bridge the buildkit push name to the host-reachable name for the buildkit
 # backend's host-side finalize (see PACK_HOST_REGISTRY_REMAP in the steering docs).
-if [ -z "${PACK_HOST_REGISTRY_REMAP:-}" ] && [ "$REGISTRY_PUSH" != "$REGISTRY_HOST" ]; then
-  export PACK_HOST_REGISTRY_REMAP="${REGISTRY_PUSH}=${REGISTRY_HOST}"
+# Only the buildkit backend needs this: its solve pushes under the in-network name,
+# but the host-side finalize must reach the same registry by its host name.
+if [ -z "${PACK_HOST_REGISTRY_REMAP:-}" ] && [ "$BUILDKIT_REGISTRY_PUSH" != "$REGISTRY_HOST" ]; then
+  export PACK_HOST_REGISTRY_REMAP="${BUILDKIT_REGISTRY_PUSH}=${REGISTRY_HOST}"
 fi
 
 RUN_TS="$(date -u +%Y%m%d-%H%M%S)"
@@ -84,9 +99,10 @@ elapsed() { awk -v s="$1" -v e="$2" 'BEGIN { printf "%.2f", (e - s) }'; }
 speedup() { awk -v c="$1" -v r="$2" 'BEGIN { if (r>0) printf "%.2fx", c/r; else printf "n/a" }'; }
 ratio() { awk -v a="$1" -v b="$2" 'BEGIN { if (b>0) printf "%.2fx", a/b; else printf "n/a" }'; }
 
-# do_build_daemon runs a standard docker-daemon build (default backend). No cache
-# flags: pack auto-creates and reuses docker volume caches across builds. Single
-# host platform, published.
+# do_build_daemon runs a standard docker-daemon build (default backend). It builds
+# to the LOCAL DOCKER DAEMON (no --publish) — the natural stock-pack usage; we are
+# measuring the BUILD, not the publish. No cache flags: pack auto-creates and reuses
+# docker volume caches across builds. Single host platform.
 do_build_daemon() {
   local image="$1" app_path="$2" logfile="$3"
   "$PACK_BIN" build "$image" \
@@ -94,7 +110,7 @@ do_build_daemon() {
     --builder "$BUILDER" \
     --run-image "$RUN_IMAGE" \
     --platform "$PLATFORM" \
-    --publish --trust-builder --verbose \
+    --trust-builder --verbose \
     >"$logfile" 2>&1
   return $?
 }
@@ -145,7 +161,7 @@ run_pair() {
   echo "- builder (both): \`${BUILDER}\`"
   echo "- run image: \`${RUN_IMAGE}\`"
   echo "- platform: \`${PLATFORM}\`"
-  echo "- registry (push/host): \`${REGISTRY_PUSH}\` / \`${REGISTRY_HOST}\`"
+  echo "- output: docker-daemon -> local daemon (no push); buildkit -> registry \`${BUILDKIT_REGISTRY_PUSH}\` (host \`${REGISTRY_HOST}\`)"
   echo
   echo "| App | daemon cold (s) | daemon rebuild (s) | daemon speedup | buildkit cold (s) | buildkit rebuild (s) | buildkit speedup | cold Δ (bk/daemon) | rebuild Δ (bk/daemon) | Result |"
   echo "|-----|----------------:|-------------------:|---------------:|------------------:|---------------------:|-----------------:|-------------------:|----------------------:|--------|"
@@ -165,13 +181,13 @@ for app in $BENCH_APPS; do
     continue
   fi
 
-  # docker-daemon backend
-  d_image="${REGISTRY_PUSH}/cmp-daemon-${tag}:latest"
+  # docker-daemon backend: build to the local daemon (no registry prefix, no push).
+  d_image="cmp-daemon-${tag}:latest"
   read -r d_cold d_rebuild d_speedup d_result <<<"$(run_pair daemon "$d_image" "$app_path" "$tag")"
   [ "$d_result" = "OK" ] || overall_rc=1
 
-  # buildkit backend
-  b_image="${REGISTRY_PUSH}/cmp-buildkit-${tag}:latest"
+  # buildkit backend (solves in-container -> in-network name; finalize remaps to host)
+  b_image="${BUILDKIT_REGISTRY_PUSH}/cmp-buildkit-${tag}:latest"
   read -r b_cold b_rebuild b_speedup b_result <<<"$(run_pair buildkit "$b_image" "$app_path" "$tag")"
   [ "$b_result" = "OK" ] || overall_rc=1
 
