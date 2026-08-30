@@ -164,7 +164,10 @@ func (b *BuildkitBackend) driveNative(ctx context.Context, bkClient *client.Clie
 		}},
 	}
 
-	ch := b.startProgressDisplay("[buildkit]")
+	// Empty progress prefix: each vertex name already carries a "[os/arch]" prefix
+	// (see platformLabel in native_buildfunc.go), so lines read
+	// "#15 [linux/arm64] lifecycle: analyzer" without a redundant backend tag.
+	ch := b.startProgressDisplay("")
 	b.logger.Infof("Building %s via buildkit (%d platform(s))", opts.ImageName, len(platforms))
 
 	// product="" -> default. nativeBuildFunc is pack's in-process gateway BuildFunc.

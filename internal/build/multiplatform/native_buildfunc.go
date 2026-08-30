@@ -159,19 +159,20 @@ func nativeBuildPlatform(ctx context.Context, c client.Client, in nativeBuildInp
 // layers like process-types). Reused run-image layers are already in the base.
 func assembleFromRunImage(runRef string, built llb.State, plan emit.Plan, p ocispecs.Platform) llb.State {
 	state := llb.Image(runRef, llb.Platform(p))
+	plat := platformLabel(p)
 	for _, layer := range plan.Layers {
 		if layer.Reused {
 			continue
 		}
 		switch {
 		case layer.Source != nil && (layer.Source.Dir != "" || layer.Source.File != ""):
-			state = copyFromSource(state, built, layer)
+			state = copyFromSource(state, built, layer, plat)
 		case layer.TarPath != "":
 			// Synthesized layer (e.g. process-types): copy from the small persisted
 			// tree. The emit step persisted a tar; for the MVP the tree copy path
 			// reads the extracted tree the emit step also lays down next to it.
 			// (Process-types is symlinks-only; a tar copy of a tiny tree.)
-			state = copyFromTree(state, built, layer)
+			state = copyFromTree(state, built, layer, plat)
 		}
 	}
 	return state
@@ -179,7 +180,7 @@ func assembleFromRunImage(runRef string, built llb.State, plan emit.Plan, p ocis
 
 // copyFromSource adds one layer by copying the layer's files from the built state's
 // source path onto the assembly base, applying the emitted uid/gid (and mode/dest).
-func copyFromSource(state, built llb.State, layer emit.LayerOp) llb.State {
+func copyFromSource(state, built llb.State, layer emit.LayerOp, plat string) llb.State {
 	src := layer.Source
 	chown := &llb.ChownOpt{User: &llb.UserOpt{UID: src.UID}, Group: &llb.UserOpt{UID: src.GID}}
 	info := &llb.CopyInfo{
@@ -210,7 +211,7 @@ func copyFromSource(state, built llb.State, layer emit.LayerOp) llb.State {
 	}
 	return state.File(
 		llb.Copy(built, from, dest, info),
-		llb.WithCustomNamef("assemble layer (copy): %s", layer.ID),
+		llb.WithCustomNamef("[%s] assemble layer (copy): %s", plat, layer.ID),
 	)
 }
 
@@ -218,7 +219,7 @@ func copyFromSource(state, built llb.State, layer emit.LayerOp) llb.State {
 // The emit step persisted the layer as a tar under <emitDir>/buildkit/layers/;
 // for a copy-based assembly we read the extracted tree the emit step lays down at
 // the same path with a ".d" suffix. (Process-types etc. are tiny.)
-func copyFromTree(state, built llb.State, layer emit.LayerOp) llb.State {
+func copyFromTree(state, built llb.State, layer emit.LayerOp, plat string) llb.State {
 	// layer.TarPath is relative to the emit output root (e.g.
 	// "buildkit/layers/NNN-name.tar"); the corresponding extracted tree is at
 	// "<same>.d". Both live under emitDirNBF in the built state.
@@ -226,7 +227,7 @@ func copyFromTree(state, built llb.State, layer emit.LayerOp) llb.State {
 	src := path.Join(emitDirNBF, treeRel)
 	return state.File(
 		llb.Copy(built, src, "/", &llb.CopyInfo{CreateDestPath: true, CopyDirContentsOnly: true, AllowWildcard: true}),
-		llb.WithCustomNamef("assemble layer (tree): %s", layer.ID),
+		llb.WithCustomNamef("[%s] assemble layer (tree): %s", plat, layer.ID),
 	)
 }
 
@@ -356,31 +357,43 @@ func mergeEnvNBF(base []string, overlay map[string]string) []string {
 // buildEmitLLB constructs the LLB that runs the lifecycle phases + exporter
 // emit-mode, producing /emit/buildkit/{plan.json,config.json,build-metadata.json}
 // and the per-layer sources under /layers + /workspace in the built state.
+// platformLabel renders a platform as "os/arch[/variant]" for use as a per-vertex
+// progress-name prefix, so multi-platform solves show which architecture each
+// operation runs on (e.g. "[linux/arm64] lifecycle: analyzer").
+func platformLabel(p ocispecs.Platform) string {
+	s := p.OS + "/" + p.Architecture
+	if p.Variant != "" {
+		s += "/" + p.Variant
+	}
+	return s
+}
+
 func buildEmitLLB(in nativeBuildInputs, p ocispecs.Platform) llb.State {
 	base := llb.Image(in.builderImage, llb.Platform(p))
+	plat := platformLabel(p) // e.g. "linux/arm64" — prefixed onto every vertex name below
 
 	if in.lifecycleImage != "" {
 		lc := llb.Image(in.lifecycleImage, llb.Platform(p))
 		base = base.Run(
 			llb.Args([]string{"/bin/sh", "-c", "rm -rf /cnb/lifecycle"}),
-			llb.WithCustomName("remove existing lifecycle"),
+			llb.WithCustomNamef("[%s] remove existing lifecycle", plat),
 		).Root()
 		base = base.File(
 			llb.Copy(lc, "/cnb/lifecycle", "/cnb/lifecycle", &llb.CopyInfo{CreateDestPath: true}),
-			llb.WithCustomName("overlay emit-capable lifecycle"),
+			llb.WithCustomNamef("[%s] overlay emit-capable lifecycle", plat),
 		)
 	}
 
 	base = base.Run(
 		llb.Args([]string{"/bin/sh", "-c", "mkdir -p /cache /layers /platform " + emitDirNBF + " && chmod -R 777 /cache /layers " + emitDirNBF}),
-		llb.WithCustomName("setup directories"),
+		llb.WithCustomNamef("[%s] setup directories", plat),
 	).Root()
 
 	if in.orderTOML != "" {
 		orderCmd := fmt.Sprintf("cat > /cnb/order.toml << 'TOML'\n%s\nTOML", in.orderTOML)
 		base = base.Run(
 			llb.Args([]string{"/bin/bash", "-c", orderCmd}),
-			llb.WithCustomName("write order.toml"),
+			llb.WithCustomNamef("[%s] write order.toml", plat),
 			llb.User("0:0"),
 		).Root()
 	}
@@ -388,11 +401,11 @@ func buildEmitLLB(in nativeBuildInputs, p ocispecs.Platform) llb.State {
 	appSrc := llb.Local(contextLocalName)
 	base = base.File(
 		llb.Copy(appSrc, "/", "/workspace", &llb.CopyInfo{CreateDestPath: true, AllowWildcard: true, AllowEmptyWildcard: true}),
-		llb.WithCustomName("copy app source"),
+		llb.WithCustomNamef("[%s] copy app source", plat),
 	)
 	base = base.Run(
 		llb.Args([]string{"/bin/sh", "-c", "chmod -R 777 /workspace"}),
-		llb.WithCustomName("fix workspace permissions"),
+		llb.WithCustomNamef("[%s] fix workspace permissions", plat),
 	).Root()
 
 	cacheMount := llb.AddMount("/cache", llb.Scratch(), llb.AsPersistentCacheDir("cnb-buildpacks-cache-"+p.Architecture, llb.CacheMountShared))
@@ -411,7 +424,7 @@ func buildEmitLLB(in nativeBuildInputs, p ocispecs.Platform) llb.State {
 
 	base = base.Run(
 		llb.Args([]string{"/bin/sh", "-c", "chmod 777 /cache"}),
-		llb.WithCustomName("fix cache mount permissions"), cacheMount, llb.IgnoreCache,
+		llb.WithCustomNamef("[%s] fix cache mount permissions", plat), cacheMount, llb.IgnoreCache,
 	).Root()
 
 	skipChown := []string{"-skip-chown", "-uid", fmt.Sprintf("%d", in.uid), "-gid", fmt.Sprintf("%d", in.gid)}
@@ -420,20 +433,20 @@ func buildEmitLLB(in nativeBuildInputs, p ocispecs.Platform) llb.State {
 	analyzerArgs := append([]string{"/cnb/lifecycle/analyzer"}, skipChown...)
 	analyzerArgs = append(analyzerArgs, insecure...)
 	analyzerArgs = append(analyzerArgs, "-run-image", in.runImage, "-layers", "/layers", in.imageName)
-	base = base.Run(append([]llb.RunOption{llb.Args(analyzerArgs), llb.WithCustomName("lifecycle: analyzer"), cacheMount}, env...)...).Root()
+	base = base.Run(append([]llb.RunOption{llb.Args(analyzerArgs), llb.WithCustomNamef("[%s] lifecycle: analyzer", plat), cacheMount}, env...)...).Root()
 
-	base = base.Run(append([]llb.RunOption{llb.Args([]string{"/cnb/lifecycle/detector", "-app", "/workspace", "-layers", "/layers"}), llb.WithCustomName("lifecycle: detector")}, env...)...).Root()
+	base = base.Run(append([]llb.RunOption{llb.Args([]string{"/cnb/lifecycle/detector", "-app", "/workspace", "-layers", "/layers"}), llb.WithCustomNamef("[%s] lifecycle: detector", plat)}, env...)...).Root()
 
 	restorerArgs := append([]string{"/cnb/lifecycle/restorer"}, skipChown...)
 	restorerArgs = append(restorerArgs, "-layers", "/layers")
-	base = base.Run(append([]llb.RunOption{llb.Args(restorerArgs), llb.WithCustomName("lifecycle: restorer"), cacheMount}, env...)...).Root()
+	base = base.Run(append([]llb.RunOption{llb.Args(restorerArgs), llb.WithCustomNamef("[%s] lifecycle: restorer", plat), cacheMount}, env...)...).Root()
 
-	base = base.Run(append([]llb.RunOption{llb.Args([]string{"/cnb/lifecycle/builder", "-app", "/workspace", "-layers", "/layers"}), llb.WithCustomName("lifecycle: builder")}, env...)...).Root()
+	base = base.Run(append([]llb.RunOption{llb.Args([]string{"/cnb/lifecycle/builder", "-app", "/workspace", "-layers", "/layers"}), llb.WithCustomNamef("[%s] lifecycle: builder", plat)}, env...)...).Root()
 
 	exporterArgs := append([]string{"/cnb/lifecycle/exporter"}, skipChown...)
 	exporterArgs = append(exporterArgs, insecure...)
 	exporterArgs = append(exporterArgs, "-layers", "/layers", "-app", "/workspace", "-emit-export-plan", emitDirNBF, in.imageName)
-	base = base.Run(append([]llb.RunOption{llb.Args(exporterArgs), llb.WithCustomName("lifecycle: exporter (emit-mode)"), cacheMount}, env...)...).Root()
+	base = base.Run(append([]llb.RunOption{llb.Args(exporterArgs), llb.WithCustomNamef("[%s] lifecycle: exporter (emit-mode)", plat), cacheMount}, env...)...).Root()
 
 	return base
 }

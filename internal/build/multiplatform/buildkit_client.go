@@ -61,6 +61,12 @@ func (b *BuildkitBackend) startProgressDisplay(prefix string) chan *client.Solve
 	vertexStartTimes := make(map[string]int64)
 	vertexNumbers := make(map[string]int)
 	vertexCounter := 0
+	// tag is " <prefix>" when a prefix is set, else "" — so an empty prefix does not
+	// produce a double space. Each vertex name already carries a "[os/arch]" prefix.
+	tag := ""
+	if prefix != "" {
+		tag = " " + prefix
+	}
 	go func() {
 		for status := range ch {
 			for _, v := range status.Vertexes {
@@ -69,7 +75,7 @@ func (b *BuildkitBackend) startProgressDisplay(prefix string) chan *client.Solve
 					vertexCounter++
 					vertexStartTimes[id] = v.Started.UnixMilli()
 					vertexNumbers[id] = vertexCounter
-					fmt.Fprintf(os.Stderr, "#%d %s %s\n", vertexCounter, prefix, v.Name)
+					fmt.Fprintf(os.Stderr, "#%d%s %s\n", vertexCounter, tag, v.Name)
 				}
 				if v.Completed != nil {
 					num := vertexNumbers[id]
@@ -79,11 +85,11 @@ func (b *BuildkitBackend) startProgressDisplay(prefix string) chan *client.Solve
 						duration = float64(v.Completed.UnixMilli()-startMs) / 1000.0
 					}
 					if v.Cached {
-						fmt.Fprintf(os.Stderr, "#%d %s %s CACHED\n", num, prefix, v.Name)
+						fmt.Fprintf(os.Stderr, "#%d%s %s CACHED\n", num, tag, v.Name)
 					} else if v.Error != "" {
-						fmt.Fprintf(os.Stderr, "#%d %s %s ERROR: %s\n", num, prefix, v.Name, v.Error)
+						fmt.Fprintf(os.Stderr, "#%d%s %s ERROR: %s\n", num, tag, v.Name, v.Error)
 					} else {
-						fmt.Fprintf(os.Stderr, "#%d %s %s DONE %.1fs\n", num, prefix, v.Name, duration)
+						fmt.Fprintf(os.Stderr, "#%d%s %s DONE %.1fs\n", num, tag, v.Name, duration)
 					}
 				}
 			}
@@ -98,7 +104,7 @@ func (b *BuildkitBackend) startProgressDisplay(prefix string) chan *client.Solve
 				lines := strings.Split(string(l.Data), "\n")
 				for _, line := range lines {
 					if line != "" {
-						fmt.Fprintf(os.Stderr, "#%d %s %s\n", stepNum, prefix, line)
+						fmt.Fprintf(os.Stderr, "#%d%s %s\n", stepNum, tag, line)
 					}
 				}
 			}
