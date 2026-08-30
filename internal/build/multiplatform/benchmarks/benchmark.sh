@@ -96,10 +96,12 @@ do_build() {
   local image="$1" app_path="$2" logfile="$3"
   local lc_args=()
   [ -n "$LIFECYCLE_IMAGE" ] && lc_args=(--lifecycle-image "$LIFECYCLE_IMAGE")
+  # ${lc_args[@]+"${lc_args[@]}"} is the set -u-safe way to expand a possibly-empty
+  # array (when LIFECYCLE_IMAGE is unset, lc_args is empty and must not error).
   "$PACK_BIN" build "$image" \
     --path "$app_path" \
     --builder "$BUILDER" \
-    "${lc_args[@]}" \
+    ${lc_args[@]+"${lc_args[@]}"} \
     --run-image "$RUN_IMAGE" \
     --platforms "$PLATFORMS" \
     --buildkit --build-backend buildkit \
