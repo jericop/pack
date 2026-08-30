@@ -8,7 +8,6 @@ require (
 	github.com/buildpacks/imgutil v0.0.0-20260715132717-40ca3490b49e
 	github.com/buildpacks/lifecycle v0.21.0
 	github.com/chainguard-dev/kaniko v1.25.16
-	github.com/containerd/containerd/v2 v2.3.3
 	github.com/containerd/errdefs v1.0.0
 	github.com/docker/cli v29.7.2+incompatible
 	github.com/docker/docker v28.5.2+incompatible
@@ -23,6 +22,7 @@ require (
 	github.com/heroku/color v0.0.6
 	github.com/mitchellh/ioprogress v0.0.0-20180201004757-6a23b12fa88e
 	github.com/moby/buildkit v0.32.2
+	github.com/moby/docker-image-spec v1.3.1
 	github.com/moby/go-archive v0.3.3
 	github.com/moby/moby/api v1.55.0
 	github.com/moby/moby/client v0.5.1
@@ -84,6 +84,7 @@ require (
 	github.com/cloudflare/circl v1.6.3 // indirect
 	github.com/containerd/console v1.0.5 // indirect
 	github.com/containerd/containerd/api v1.11.1 // indirect
+	github.com/containerd/containerd/v2 v2.3.3 // indirect
 	github.com/containerd/continuity v0.5.0 // indirect
 	github.com/containerd/errdefs/pkg v0.3.0 // indirect
 	github.com/containerd/log v0.1.0 // indirect
@@ -123,7 +124,6 @@ require (
 	github.com/mattn/go-colorable v0.1.14 // indirect
 	github.com/mattn/go-isatty v0.0.20 // indirect
 	github.com/mitchellh/go-homedir v1.1.0 // indirect
-	github.com/moby/docker-image-spec v1.3.1 // indirect
 	github.com/moby/locker v1.0.1 // indirect
 	github.com/moby/patternmatcher v0.6.1 // indirect
 	github.com/moby/sys/sequential v0.7.0 // indirect
@@ -170,10 +170,12 @@ require (
 
 replace github.com/BurntSushi/toml => github.com/BurntSushi/toml v1.3.2
 
-// LOCAL DEV: consume the fork's lifecycle (buildkit-native-export emit-mode) from
-// the local clone during the MVP iterate-both-repos loop. For CI/PR reproducibility
-// this will be repointed at a pushed tag (e.g. github.com/jericop/cnb-lifecycle
-// v100.0.1) — a high, collision-proof semver consumed via replace.
-replace github.com/buildpacks/lifecycle => /Users/jpena/.repos/jericop/cnb-lifecycle
+// Consume the fork's lifecycle (single builder-agnostic buildkit backend) pinned to
+// the buildkit-native-export-v0.1.0 tag. The tag is not a valid semver, so Go
+// resolves it to a pseudo-version below; re-run `go mod tidy` after moving the tag.
+//   repo:   https://github.com/jericop/cnb-lifecycle
+//   branch: https://github.com/jericop/cnb-lifecycle/tree/buildkit-native-export
+//   tag:    https://github.com/jericop/cnb-lifecycle/releases/tag/buildkit-native-export-v0.1.0
+replace github.com/buildpacks/lifecycle => github.com/jericop/cnb-lifecycle v0.0.0-20260830032718-10289fe7665b
 
 go 1.26.6
