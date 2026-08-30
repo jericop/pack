@@ -30,6 +30,10 @@ on:
   push:
     tags:
       - 'v*'
+      # Feature-line tags publish an image whose tag matches the git tag verbatim,
+      # e.g. buildkit-native-export-v0.1.0 -> docker.io/jericop/pack:buildkit-native-export-v0.1.0.
+      # This keeps pack, lifecycle, and the builder on the same tag string.
+      - 'buildkit-native-export-v*'
   workflow_dispatch:
     inputs:
       version:
@@ -74,19 +78,32 @@ jobs:
       - name: Derive pack version
         shell: bash
         run: |
+          # PACK_VERSION  = version stamped into the binary + used in artifact names.
+          # RELEASE_TAG   = the git/GitHub release tag (== the pushed tag verbatim,
+          #                 or v<PACK_VERSION> for the classic v* / workflow_dispatch path).
+          version=""
+          release_tag=""
           if [ -n "${{ github.event.inputs.version }}" ]; then
             # workflow_dispatch: version supplied without leading v.
             version="${{ github.event.inputs.version }}"
-          elif [[ "$GITHUB_REF" =~ ^refs/tags/v(.*)$ ]]; then
-            # tag push: strip refs/tags/v prefix.
+            release_tag="v${version}"
+          elif [[ "$GITHUB_REF" =~ ^refs/tags/(buildkit-native-export-v.*)$ ]]; then
+            # Feature-line tag: the image/release tag matches the git tag verbatim
+            # (no leading-v gymnastics), so pack lines up with lifecycle + builder.
             version="${BASH_REMATCH[1]}"
+            release_tag="${version}"
+          elif [[ "$GITHUB_REF" =~ ^refs/tags/v(.*)$ ]]; then
+            # Classic tag push: strip refs/tags/v prefix.
+            version="${BASH_REMATCH[1]}"
+            release_tag="v${version}"
           fi
           if [[ -z "${version}" ]]; then
-            echo "ERROR: pack version not detected (expected a v<version> tag push or a workflow_dispatch version input)."
+            echo "ERROR: pack version not detected (expected a v<version> or buildkit-native-export-v<version> tag push, or a workflow_dispatch version input)."
             exit 1
           fi
           echo "PACK_VERSION=${version}" >> $GITHUB_ENV
-          echo "Derived PACK_VERSION=${version}"
+          echo "RELEASE_TAG=${release_tag}" >> $GITHUB_ENV
+          echo "Derived PACK_VERSION=${version} RELEASE_TAG=${release_tag}"
       - name: Build linux binaries (amd64, arm64)
         env:
           PACK_BUILD: ${{ github.run_number }}
@@ -102,16 +119,19 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          # Artifact names use RELEASE_TAG so they match the release/git tag exactly
+          # (v<version> for the classic path, buildkit-native-export-v<version> for
+          # the feature-line path) instead of hard-coding a leading v.
           package() {
             local arch="$1" label="$2"
             chmod +x "dist/linux-${arch}/pack"
-            local filename="pack-v${PACK_VERSION}-${label}.tgz"
+            local filename="pack-${RELEASE_TAG}-${label}.tgz"
             tar -C "dist/linux-${arch}" -vzcf "${filename}" pack
             shasum -a 256 "${filename}" > "${filename}.sha256"
           }
           package amd64 linux
           package arm64 linux-arm64
-          ls -la pack-v${PACK_VERSION}-*
+          ls -la pack-${RELEASE_TAG}-*
       - name: Extract pack help
         id: pack_help
         run: |
@@ -125,35 +145,37 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
-          # Reuse the pushed tag as-is on a tag push; fall back to a v-prefixed
-          # tag name for the workflow_dispatch path.
-          tag_name: v${{ env.PACK_VERSION }}
-          name: pack v${{ env.PACK_VERSION }}
+          # RELEASE_TAG == the pushed git tag verbatim (v<version> classic path,
+          # or buildkit-native-export-v<version> feature-line path), so the git
+          # tag, the GitHub release tag, the artifacts, and the docker tag all
+          # line up.
+          tag_name: ${{ env.RELEASE_TAG }}
+          name: pack ${{ env.RELEASE_TAG }}
           draft: true
           # Not a prerelease: keeps the release tag == git tag == docker tag and
           # avoids the prerelease/`released`-event confusion. It stays a DRAFT
           # until you publish it manually.
           prerelease: false
-          files: pack-v${{ env.PACK_VERSION }}-*
+          files: pack-${{ env.RELEASE_TAG }}-*
           body: |
             ## Experimental fork build (jericop/pack)
 
             This is an experimental build of `pack` from the `jericop/pack` fork
-            containing the BuildKit LLB OCI-layout multi-arch work. It is NOT an
-            official Cloud Native Buildpacks release.
+            containing the BuildKit multi-arch work. It is NOT an official Cloud
+            Native Buildpacks release.
 
             Linux binaries only (amd64, arm64). The multi-arch Docker image
-            `docker.io/jericop/pack:${{ env.PACK_VERSION }}` (org configurable via
+            `docker.io/jericop/pack:${{ env.RELEASE_TAG }}` (org configurable via
             the `DOCKERHUB_ORG` repo variable) is published separately by running
-            the `delivery / docker` workflow with `tag_name: v${{ env.PACK_VERSION }}`.
+            the `delivery / docker` workflow with `tag_name: ${{ env.RELEASE_TAG }}`.
 
             ### Install (Linux)
 
             ```bash
             # amd64
-            (curl -sSL "https://github.com/${{ github.repository }}/releases/download/v${{ env.PACK_VERSION }}/pack-v${{ env.PACK_VERSION }}-linux.tgz" | sudo tar -C /usr/local/bin/ --no-same-owner -xzv pack)
+            (curl -sSL "https://github.com/${{ github.repository }}/releases/download/${{ env.RELEASE_TAG }}/pack-${{ env.RELEASE_TAG }}-linux.tgz" | sudo tar -C /usr/local/bin/ --no-same-owner -xzv pack)
             # arm64
-            (curl -sSL "https://github.com/${{ github.repository }}/releases/download/v${{ env.PACK_VERSION }}/pack-v${{ env.PACK_VERSION }}-linux-arm64.tgz" | sudo tar -C /usr/local/bin/ --no-same-owner -xzv pack)
+            (curl -sSL "https://github.com/${{ github.repository }}/releases/download/${{ env.RELEASE_TAG }}/pack-${{ env.RELEASE_TAG }}-linux-arm64.tgz" | sudo tar -C /usr/local/bin/ --no-same-owner -xzv pack)
             ```
 
             ### `pack --help`

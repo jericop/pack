@@ -50,11 +50,18 @@ jobs:
               throw "ERROR: unable to determine tag";
             }
 
+            // The git tag to check out is the tag verbatim. The docker image tag
+            // is derived from it:
+            //   classic:       v0.0.1-buildkit-poc      -> image tag 0.0.1-buildkit-poc
+            //   feature-line:  buildkit-native-export-v0.1.0 -> image tag buildkit-native-export-v0.1.0
+            // We only strip a SINGLE leading v (classic scheme); the feature-line
+            // tag has no leading v, so it passes through unchanged.
+            core.setOutput('git_tag', tag);
             return tag.replace(/^v/, '');
       - name: Checkout source at tag
         uses: actions/checkout@v4
         with:
-          ref: v${{ steps.version.outputs.result }}
+          ref: ${{ steps.version.outputs.git_tag }}
       - name: Determine App Name
         run: 'echo "IMG_NAME=${{ env.REGISTRY_NAME }}/${{ env.DOCKERHUB_ORG }}/${{ env.IMG_NAME }}" >> $GITHUB_ENV'
       - name: Login to Dockerhub
