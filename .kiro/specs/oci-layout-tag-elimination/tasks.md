@@ -1,5 +1,11 @@
 # Tasks: LLB Native Image Export to Eliminate Intermediate Tags
 
+> **STATUS — SUPERSEDED (historical spike).** These tasks implemented the removed
+> OCI-layout tag-elimination approach (LLB backend + `llb.OCILayout()` +
+> `-pull-run-image`). That approach and all its code have been removed in favor of
+> the single `buildkit` backend (build-then-finalize) — see the `buildkit-native-export`
+> spec and `buildkit-multiarch` steering. Retained only as a record of the spike.
+
 Scope: LLB backend only. The Dockerfile backend stays as-is (MVP with intermediate tags).
 
 ## Task 1: Prototype the /output OCI layout export (Phase 1)

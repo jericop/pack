@@ -1,5 +1,13 @@
 # Design: LLB Native Image Export to Eliminate Intermediate Tags
 
+> **STATUS — SUPERSEDED (historical spike).** The OCI-layout approach described here
+> (LLB backend + `llb.OCILayout()` + native `ExporterImage` + `-pull-run-image`) was
+> NOT the final implementation. It, the LLB/Dockerfile backends, the `oci_layout_*.go`
+> files, and the `-pull-run-image` flag have all been REMOVED. The implemented
+> approach is the single `buildkit` backend (build-then-finalize) — see the
+> `buildkit-native-export` spec and `buildkit-multiarch` steering. Retained only as a
+> record of the spike.
+
 ## Scope
 
 This work targets the **LLB backend only**. The Dockerfile backend remains as-is: it is an MVP that proves the concept using registry mode with intermediate per-arch tags. Intermediate tags on the Dockerfile path are acceptable and out of scope for elimination — that path exists only to demonstrate feasibility and will not be the shipped approach.

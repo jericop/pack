@@ -1,5 +1,13 @@
 # Requirements: LLB Native Image Export to Eliminate Intermediate Tags
 
+> **STATUS — SUPERSEDED (historical spike).** This entire spec covers the
+> OCI-layout tag-elimination approach (LLB backend + `llb.OCILayout()` +
+> `-pull-run-image`). That approach, the LLB/Dockerfile backends, the
+> `oci_layout_*.go` files, and the `-pull-run-image` flag have all been REMOVED.
+> The implemented approach is the single builder-agnostic `buildkit` backend
+> (build-then-finalize) documented in the `buildkit-native-export` spec and the
+> `buildkit-multiarch` steering file. Retained only as a record of the spike.
+
 ## Overview
 
 Eliminate intermediate per-architecture registry tags in the BuildKit multi-arch build flow by having the **LLB backend** use BuildKit's `llb.OCILayout()` source and native `ExporterImage` push. The lifecycle exports each architecture's complete image to OCI layout inside the build; BuildKit imports that layout and pushes it natively, assembling the manifest list without ever creating intermediate tags and without pack shelling out to `docker buildx` or re-pushing via go-containerregistry.

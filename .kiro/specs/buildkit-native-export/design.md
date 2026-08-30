@@ -2,13 +2,22 @@
 
 ## Overview
 
-The `buildkit-native` backend lets BuildKit BUILD and PUSH the CNB app image
+The `buildkit` backend lets BuildKit BUILD and PUSH the CNB app image
 natively, then runs a lifecycle-owned FINALIZE step that authors the correct CNB
 metadata on the pushed image from its ACTUAL produced layers. No custom BuildKit
 gateway frontend, no per-layer re-extraction, no post-push layer changes.
 
-Experimental, opt-in: `--build-backend=buildkit-native`. Other backends
-(buildkit-dockerfile, buildkit-llb/oci-layout) are unchanged.
+Experimental, opt-in: `--build-backend=buildkit` (the only implemented backend
+value; `auto` resolves to it). The `BuildBackend` interface / `BackendType` enum /
+factory / `--build-backend` flag are retained for a future buildah-podman backend.
+
+> NOTE (as-implemented): this spec was written during the spike. The backend value
+> is `buildkit` (was `buildkit-native`); the build-phase label is
+> `io.buildpacks.lifecycle.prepared-metadata` (was
+> `io.buildpacks.buildkit.native.build-metadata`); the planned self-heal flag is
+> `--buildkit-fix-image-metadata`. The earlier `buildkit-dockerfile`/`buildkit-llb`
+> backends and the OCI-layout export mode have been removed. Read the older names
+> below as the current ones.
 
 This design SUPERSEDES the earlier "custom frontend + host-side metadata-SHA
 rewrite" design. See `cnb-lifecycle/.kiro/specs/cnb-buildkit-frontend/spike-eliminate-metadata-rewrite.md`

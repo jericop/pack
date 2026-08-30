@@ -52,11 +52,18 @@ host-side metadata-SHA rewrite as a pack-owned workaround.
    yet CNB-compliant (its `io.buildpacks.lifecycle.metadata`, if present, does not
    yet match the produced layers).
 2. **Finalize phase (lifecycle library, pack calls it):** read the pushed image's
-   ACTUAL produced diffIDs + the `io.buildpacks.buildkit.native.build-metadata`
+   ACTUAL produced diffIDs + the `io.buildpacks.lifecycle.prepared-metadata`
    label, author the correct `io.buildpacks.lifecycle.metadata` (per-layer SHAs =
    produced diffIDs; `RunImage.TopLayer` = the run-image boundary), and re-push ONLY
    the image config + manifest (+ index for multi-arch). No layers are modified or
    re-uploaded; the tag update is atomic.
+
+> NOTE (as-implemented): the backend value is `buildkit` (via
+> `--build-backend buildkit`), not `buildkit-native`; the build-phase label is
+> `io.buildpacks.lifecycle.prepared-metadata` (builder-agnostic); and the planned
+> self-heal flag is `--buildkit-fix-image-metadata`. This spec was written during
+> the spike and still uses the older names in places below — read them as the
+> current names.
 
 ## Two-repo split (read this first)
 
@@ -77,11 +84,13 @@ Keep the label/schema versions in sync with the lifecycle spec.
 - **Finalize phase**: a lifecycle-owned step that authors correct CNB metadata on
   the pushed image from its actual layers + the build-metadata label, then re-pushes
   config+manifest only.
-- **`io.buildpacks.buildkit.native.build-metadata`**: a build-phase image LABEL
+- **`io.buildpacks.lifecycle.prepared-metadata`**: a build-phase image LABEL
   carrying the ordered layer plan (order, new-vs-reused, intended diffIDs, history,
-  run-image boundary, semantic identity). Namespaced `io.buildpacks.buildkit.native.*`;
-  distinct from the final `io.buildpacks.lifecycle.metadata`. It is explicitly a
-  BUILD-PHASE artifact, only partially valid until finalize runs.
+  run-image boundary, semantic identity). Builder-agnostic (carries the prepared
+  plan for any build engine); distinct from the final
+  `io.buildpacks.lifecycle.metadata`. It is explicitly a BUILD-PHASE artifact, only
+  partially valid until finalize runs. (Earlier spike name:
+  `io.buildpacks.buildkit.native.build-metadata`.)
 - **Produced diffID**: the diffID BuildKit actually assigned to a layer at export
   (read from the pushed image config). This is authoritative for the finalized
   metadata.
@@ -210,8 +219,8 @@ locally, including REPEATED rebuilds and rebases.
 
 #### Acceptance Criteria
 
-1. THE approach SHALL be a distinct opt-in backend
-   (`--build-backend=buildkit-native`) that does not change the other backends.
+1. THE approach SHALL be the opt-in `buildkit` backend
+   (`--build-backend=buildkit`), selected behind `--buildkit`.
 2. THE MVP SHALL build `samples/go/no-imports` to a local registry via the local MVP
    strategy, with a runnable check (real layers, CNB labels incl a correct
    `io.buildpacks.lifecycle.metadata` after finalize, launch binary present).
@@ -272,10 +281,10 @@ command.
 
 #### Acceptance Criteria
 
-1. (DEFERRED, post-MVP) WHEN a buildkit-native build targets an image ref that
+1. (DEFERRED, post-MVP) WHEN a buildkit build targets an image ref that
    already exists remotely, pack MAY inspect its metadata validity; if invalid and
-   an opt-in flag (e.g. `--buildkit-fix-remote-image-metadata`) is set, pack MAY run
+   an opt-in flag (e.g. `--buildkit-fix-image-metadata`) is set, pack MAY run
    FINALIZE on the existing image in place (using its retained
-   `io.buildpacks.buildkit.native.build-metadata` label) before proceeding.
+   `io.buildpacks.lifecycle.prepared-metadata` label) before proceeding.
 2. This is explicitly OUT OF SCOPE for the MVP and SHALL be added only after the
    build→finalize MVP is confirmed with repeated rebuilds/rebases.
