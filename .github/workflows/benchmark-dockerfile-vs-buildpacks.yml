@@ -15,8 +15,13 @@ name: benchmark (dockerfile vs buildpacks)
 #                                   toolchain via apt) — the "what most people write"
 #                                   baseline.
 #
-# Dockerfiles live in the pack repo under
-# internal/build/multiplatform/benchmarks/dockerfiles/<app-id>.<variant>.Dockerfile.
+# Dockerfiles live under
+# internal/build/multiplatform/benchmarks/dockerfiles/<app-id>.<variant>.Dockerfile,
+# and are read from the WORKFLOW's own branch (the ref this workflow runs from), NOT
+# from pack_ref. So pack_ref selects only the code-under-test (the pack binary for the
+# buildpacks cell) and may point at a squashed/PR branch that excludes the benchmarks
+# dir — matching benchmark-perf.yml, which also consumes only the pack binary from
+# pack_ref.
 #
 # Manual only (workflow_dispatch): this is an on-demand comparison, not a per-push
 # gate. It does NOT replace benchmark-perf.yml — that workflow is the primary
@@ -32,7 +37,7 @@ on:
   workflow_dispatch:
     inputs:
       pack_ref:
-        description: "pack fork git ref to build pack + read Dockerfiles from"
+        description: "pack fork git ref to build the pack binary from (buildpacks cell only). Dockerfiles are read from the workflow's own branch, so this may be a squashed/PR branch."
         required: false
         default: "buildkit-native-export"
       builder:
@@ -76,7 +81,19 @@ jobs:
           repository: ${{ env.SAMPLES_REPO }}
           path: samples
 
-      - name: Checkout pack source (pack binary + Dockerfiles)
+      # The benchmark Dockerfiles live with the WORKFLOW (the branch this workflow
+      # runs from, e.g. fork-main), NOT with the code-under-test. This lets pack_ref
+      # point at a squashed/PR branch that intentionally excludes the benchmarks dir,
+      # matching how benchmark-perf.yml only consumes the pack binary from pack_ref.
+      - name: Checkout workflow branch (benchmark Dockerfiles)
+        uses: actions/checkout@v5
+        with:
+          path: workflow-src
+
+      # Code-under-test: only needed to BUILD the pack binary for the buildpacks cell.
+      # The dockerfile cells do not use pack, so skip this checkout for them.
+      - name: Checkout pack source (pack binary)
+        if: ${{ matrix.build_type == 'buildpacks-multi' }}
         uses: actions/checkout@v5
         with:
           repository: jericop/pack
@@ -138,7 +155,7 @@ jobs:
             ls -1 "${GITHUB_WORKSPACE}/samples" >&2 || true
             exit 1
           fi
-          df_dir="${GITHUB_WORKSPACE}/pack-src/internal/build/multiplatform/benchmarks/dockerfiles"
+          df_dir="${GITHUB_WORKSPACE}/workflow-src/internal/build/multiplatform/benchmarks/dockerfiles"
           echo "app_path=$app_path" >> "$GITHUB_OUTPUT"
           echo "bp_img=${{ secrets.DOCKERHUB_ORG }}/dfbp-bp-${{ matrix.app.id }}-${{ github.run_id }}:latest" >> "$GITHUB_OUTPUT"
           echo "cnblike_img=${{ secrets.DOCKERHUB_ORG }}/dfbp-cnblike-${{ matrix.app.id }}-${{ github.run_id }}:latest" >> "$GITHUB_OUTPUT"
