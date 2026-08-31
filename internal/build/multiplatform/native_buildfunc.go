@@ -74,6 +74,15 @@ type nativeBuildInputs struct {
 	httpProxy  string
 	httpsProxy string
 	noProxy    string
+	// defaultProcessType is passed to the exporter as -process-type so the built
+	// image's default entrypoint is the requested process (pack --default-process-type),
+	// matching standard pack.
+	defaultProcessType string
+	// additionalTags are extra tags (pack --tag). The exporter records them, but in
+	// emit-mode the RecordingImage does not push; the backend applies them when it
+	// publishes the assembled image (see exporterImageAttrs) and finalize updates
+	// each tag.
+	additionalTags []string
 }
 
 // contextLocalName is the llb.Local key under which pack provides the app source.
@@ -528,7 +537,16 @@ func buildEmitLLB(in nativeBuildInputs, p ocispecs.Platform) llb.State {
 
 	exporterArgs := append([]string{"/cnb/lifecycle/exporter"}, skipChown...)
 	exporterArgs = append(exporterArgs, insecure...)
+	if in.defaultProcessType != "" {
+		exporterArgs = append(exporterArgs, "-process-type", in.defaultProcessType)
+	}
 	exporterArgs = append(exporterArgs, "-layers", "/layers", "-app", "/workspace", "-emit-export-plan", emitDirNBF, in.imageName)
+	// Additional tags: the exporter takes args[1:] as extra names to record. In
+	// emit-mode the RecordingImage ignores them (nothing to push), so they carry no
+	// effect here beyond being recorded; the backend applies them at publish time via
+	// exporterImageAttrs + finalize. Passing them keeps the exporter's report/plan
+	// consistent with the daemon path.
+	exporterArgs = append(exporterArgs, in.additionalTags...)
 	base = base.Run(append([]llb.RunOption{llb.Args(exporterArgs), llb.WithCustomNamef("[%s] lifecycle: exporter (emit-mode)", plat), cacheMount}, env...)...).Root()
 
 	return base

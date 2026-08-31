@@ -145,6 +145,8 @@ func (b *BuildkitBackend) driveNative(ctx context.Context, bkClient *client.Clie
 		httpProxy:           opts.HTTPProxy,
 		httpsProxy:          opts.HTTPSProxy,
 		noProxy:             opts.NoProxy,
+		defaultProcessType:  opts.DefaultProcessType,
+		additionalTags:      opts.AdditionalTags,
 	}
 	if reg := registryHost(opts.ImageName); reg != "" && isLikelyInsecureRegistry(reg) {
 		in.insecureRegistries = []string{reg}
@@ -177,7 +179,7 @@ func (b *BuildkitBackend) driveNative(ctx context.Context, bkClient *client.Clie
 		// the final name — one image/index, no intermediate tags.
 		Exports: []client.ExportEntry{{
 			Type:  client.ExporterImage,
-			Attrs: exporterImageAttrs(opts.ImageName),
+			Attrs: exporterImageAttrs(opts.ImageName, opts.AdditionalTags...),
 		}},
 	}
 
@@ -206,20 +208,29 @@ func (b *BuildkitBackend) driveNative(ctx context.Context, bkClient *client.Clie
 	// must reach the same registry by its HOST-reachable name. In local test setups
 	// these differ (container-name vs localhost) — PACK_HOST_REGISTRY_REMAP bridges
 	// it (test-env only; no-op in prod where one name works from both sides).
-	finalizeRef := applyHostRegistryRemap(opts.ImageName)
-	insecure := false
-	if reg := registryHost(finalizeRef); reg != "" && isLikelyInsecureRegistry(reg) {
-		insecure = true
-	}
-	b.logger.Infof("Finalizing CNB metadata for %s", finalizeRef)
-	if err := finalize.Finalize(ctx, finalizeRef, finalize.Options{
-		Insecure: insecure,
-		Logger:   b.logger,
-		// Authenticate the finalize fetch with pack's keychain (falls back to the
-		// default keychain if nil), so it isn't subject to anonymous pull rate limits.
-		Keychain: opts.Keychain,
-	}); err != nil {
-		return nil, fmt.Errorf("finalizing CNB metadata: %w", err)
+	// Finalize the primary image name AND each additional tag (pack --tag). BuildKit
+	// pushed the same image under every name; each tag independently points at the
+	// pre-finalize manifest, so finalize must run per name to make them all
+	// CNB-compliant. Finalize is idempotent and authors from each image's own
+	// diffIDs + label, so per-tag finalize is correct (and cheap: config+manifest
+	// only, no layer re-upload).
+	finalizeNames := append([]string{opts.ImageName}, opts.AdditionalTags...)
+	for _, name := range finalizeNames {
+		finalizeRef := applyHostRegistryRemap(name)
+		insecure := false
+		if reg := registryHost(finalizeRef); reg != "" && isLikelyInsecureRegistry(reg) {
+			insecure = true
+		}
+		b.logger.Infof("Finalizing CNB metadata for %s", finalizeRef)
+		if err := finalize.Finalize(ctx, finalizeRef, finalize.Options{
+			Insecure: insecure,
+			Logger:   b.logger,
+			// Authenticate the finalize fetch with pack's keychain (falls back to the
+			// default keychain if nil), so it isn't subject to anonymous pull rate limits.
+			Keychain: opts.Keychain,
+		}); err != nil {
+			return nil, fmt.Errorf("finalizing CNB metadata for %s: %w", finalizeRef, err)
+		}
 	}
 
 	// One result per platform; all point at the pushed manifest-list name.
@@ -233,8 +244,9 @@ func (b *BuildkitBackend) driveNative(ctx context.Context, bkClient *client.Clie
 // exporterImageAttrs builds the ExporterImage attrs for the final push. It marks
 // the registry insecure (plain HTTP) when the target is a local/dev registry, so
 // BuildKit's image exporter does not attempt HTTPS against it.
-func exporterImageAttrs(imageName string) map[string]string {
-	attrs := map[string]string{"name": imageName, "push": "true"}
+func exporterImageAttrs(imageName string, additionalTags ...string) map[string]string {
+	names := append([]string{imageName}, additionalTags...)
+	attrs := map[string]string{"name": strings.Join(names, ","), "push": "true"}
 	if reg := registryHost(imageName); reg != "" && isLikelyInsecureRegistry(reg) {
 		attrs["registry.insecure"] = "true"
 	}

@@ -327,6 +327,53 @@ normal `pack build`.
    registry-export backend (`CNB_USE_LAYOUT` / `CNB_LAYOUT_DIR`, which are for local
    OCI-layout export only).
 
+### Requirement 12: Parity with the docker-daemon backend for user-facing build flags
+
+**User Story:** As a developer, I want `pack build` flags to behave the same on the
+`buildkit` backend as on the default `docker-daemon` backend, so a flag I pass is
+either honored or explicitly rejected — never silently ignored.
+
+Context: the buildkit backend hardcodes the lifecycle phase args in
+`native_buildfunc.go` (it does not reuse the daemon `Phases` list), so daemon flags
+must be re-plumbed into the LLB/exporter/finalize explicitly. A parity review
+(docker-daemon vs buildkit) found several `pack build` flags that were silently
+dropped.
+
+#### Acceptance Criteria
+
+1. `--default-process` (DefaultProcessType) SHALL be passed to the emit exporter as
+   `-process-type <value>` so the built image's default entrypoint is the requested
+   process, matching the daemon backend. (IMPLEMENTED — verified: entrypoint becomes
+   `/cnb/process/<type>`.)
+2. `--tag` (AdditionalTags) SHALL publish the image under every additional tag.
+   BuildKit's image exporter is given a comma-separated `name` attr (primary +
+   additional), and finalize SHALL run for EACH tag so all published tags are
+   CNB-compliant. (IMPLEMENTED — verified: both tags published + finalized.)
+3. `--previous-image` (PreviousImage) SHALL be honored for rebuilds (analyzer
+   `-previous-image`, with the same-registry validation the daemon enforces under
+   `--publish`). (NOT YET IMPLEMENTED — requires design work on how previous-image
+   flows through the emit/finalize model; tracked below.)
+4. `--cache-image` (registry cache) SHALL be honored or explicitly mapped to the
+   buildkit-native cache mechanism. The buildkit backend uses BuildKit's own
+   vertex/layer cache (`--buildkit-cache-from`/`--buildkit-cache-to`) rather than the
+   lifecycle `-cache-image`; the intended behavior for `--cache-image` on this
+   backend is a design decision (map to buildkit registry cache, honor the lifecycle
+   cache-image, or reject with a clear error). (NOT YET IMPLEMENTED — tracked below.)
+5. SBOM and report copy-out (`--sbom-output-dir`, `--report-output-dir`) SHALL either
+   extract the artifacts to the host (as the daemon backend does via CopyOut) or be
+   documented as unsupported on this backend. (NOT YET IMPLEMENTED.)
+6. `--volume` (user bind mounts) SHALL be honored or documented as unsupported.
+   BuildKit's isolated build model has no direct daemon bind-mount equivalent; this
+   is a design decision. (NOT YET IMPLEMENTED.)
+7. Order-defined EXTENSIONS (Dockerfiles / extender / kaniko) are NOT supported by
+   this backend and SHALL be documented as such (the buildkit path runs a fixed
+   analyzer/detector/builder/exporter with no extender). (DOCUMENTED — out of scope.)
+
+Intentionally N/A on this publish-only, registry-export backend (NOT gaps):
+`-daemon` and docker-socket access, load-to-local-daemon, the launch cache (only
+used by `-daemon` export), non-publish output modes, and `--layout` (OCI on-disk
+export was removed on this branch).
+
 ### Requirement 10: Self-healing (DEFERRED — after MVP)
 
 **User Story:** As a CI/CD operator, I want a way to detect and fix an image whose

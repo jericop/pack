@@ -225,6 +225,13 @@ type PlatformBuildOpts struct {
 	// finalize falls back to anonymous access and can hit registry pull rate limits
 	// (e.g. Docker Hub TOOMANYREQUESTS).
 	Keychain authn.Keychain
+	// DefaultProcessType is the default process (pack --default-process-type). Passed
+	// to the exporter as -process-type so the built image's default entrypoint matches
+	// the daemon backend.
+	DefaultProcessType string
+	// AdditionalTags are extra tags to publish the image under (pack --tag). BuildKit
+	// pushes the image under all of them; finalize is run per tag.
+	AdditionalTags []string
 }
 
 // PlatformBuildResult describes the outcome of building for a single platform.

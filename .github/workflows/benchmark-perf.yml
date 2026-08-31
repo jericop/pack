@@ -25,20 +25,10 @@ name: benchmark (perf matrix)
 # for accurate perf numbers.
 
 on:
-  # Runs on every push to the feature branch so we always have fresh, isolated
-  # numbers for whatever was just pushed. Scoped to code/workflow/benchmark paths so
-  # doc-only pushes don't spend ~20+ min of runner time on a full 15-cell matrix.
-  push:
-    branches:
-      - buildkit-native-export
-    paths:
-      - 'cmd/**'
-      - 'internal/**'
-      - 'pkg/**'
-      - 'go.mod'
-      - 'go.sum'
-      - '.github/workflows/benchmark-perf.yml'
-      - 'internal/build/multiplatform/benchmarks/**'
+  # Manual only (workflow_dispatch). This benchmark drives many real multi-arch
+  # builds (15 cells) and can exhaust registry pull rate limits (e.g. Docker Hub
+  # TOOMANYREQUESTS) when run repeatedly, so it is NOT wired to push/PR — run it on
+  # demand. On dispatch it builds pack from pack_ref (or copies it out of pack_image).
   workflow_dispatch:
     inputs:
       pack_image:
@@ -99,9 +89,7 @@ jobs:
         uses: actions/checkout@v5
         with:
           repository: jericop/pack
-          # On push, build the EXACT pushed commit (github.sha) so the benchmark
-          # measures what was just pushed. On workflow_dispatch, use pack_ref.
-          ref: ${{ github.event_name == 'push' && github.sha || env.PACK_REF }}
+          ref: ${{ env.PACK_REF }}
           path: pack-src
 
       - name: Set up Go
