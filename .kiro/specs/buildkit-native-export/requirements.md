@@ -349,10 +349,21 @@ dropped.
    BuildKit's image exporter is given a comma-separated `name` attr (primary +
    additional), and finalize SHALL run for EACH tag so all published tags are
    CNB-compliant. (IMPLEMENTED — verified: both tags published + finalized.)
-3. `--previous-image` (PreviousImage) SHALL be honored for rebuilds (analyzer
-   `-previous-image`, with the same-registry validation the daemon enforces under
-   `--publish`). (NOT YET IMPLEMENTED — requires design work on how previous-image
-   flows through the emit/finalize model; tracked below.)
+3. `--previous-image` is a DOCKER-DAEMON capability and SHALL be REJECTED (not
+   silently ignored) on the buildkit backend, expressed as
+   `BackendCapabilities.SupportsPreviousImage` (true for docker-daemon, false for
+   buildkit). Rationale: on the daemon backend `--previous-image` makes the analyzer
+   read a prior image's layer metadata + SBOM so the exporter reuses unchanged layers
+   BY REFERENCE (`ReuseLayer`, avoiding re-upload). The buildkit build-then-finalize
+   model already gets that layer-blob reuse from BuildKit's content-addressed vertex
+   cache (an unchanged layer keeps its digest and is not re-pushed), and finalize
+   authors metadata from the ACTUAL produced layers rather than from a prior tag — so
+   the only distinct benefit, metadata/SBOM continuity across a retag, is a niche case
+   deliberately left out of scope. The CLI rejects `--previous-image` with a message
+   explaining the buildkit cache covers layer reuse. (IMPLEMENTED — verified via CLI
+   validation test.) NOTE: distinct from the DEFERRED self-healing feature
+   (Requirement 10), which re-finalizes an existing image in place using its retained
+   prepared-metadata label and is unrelated to `--previous-image`.
 4. The lifecycle-cache flags — `--cache`, `--cache-image`, and `--clear-cache` — are
    DOCKER-DAEMON-SPECIFIC and SHALL be REJECTED (not silently ignored) on the
    buildkit backend with a clear error pointing to the buildkit equivalents

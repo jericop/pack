@@ -433,6 +433,18 @@ func validateBuildFlags(flags *BuildFlags, cfg config.Config, inputImageRef clie
 		}
 	}
 
+	// --previous-image is a docker-daemon capability: the analyzer reads a prior
+	// image's layer metadata so the exporter can reuse unchanged layers by reference.
+	// The buildkit backend gets layer-blob reuse from BuildKit's content-addressed
+	// cache and authors metadata from the actual produced layers, so it does not honor
+	// --previous-image. Reject it rather than silently ignore it.
+	if !caps.SupportsPreviousImage && flags.PreviousImage != "" {
+		return errors.Errorf(
+			"--previous-image is not supported by the %s backend; it applies to the docker-daemon backend. The buildkit backend reuses unchanged layers via BuildKit's content-addressed cache.",
+			backend,
+		)
+	}
+
 	return nil
 }
 

@@ -489,6 +489,12 @@ func testBuildCommand(t *testing.T, when spec.G, it spec.S) {
 				err := command.Execute()
 				h.AssertError(t, err, "--cache is not supported by the buildkit backend")
 			})
+
+			it("rejects --previous-image", func() {
+				command.SetArgs([]string{"--builder", "my-builder", "image", "--build-backend", "buildkit", "--publish", "--previous-image", "reg/x:prev"})
+				err := command.Execute()
+				h.AssertError(t, err, "--previous-image is not supported by the buildkit backend")
+			})
 		})
 
 		when("a valid lifecycle-image is provided", func() {

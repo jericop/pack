@@ -279,6 +279,17 @@ type BackendCapabilities struct {
 	// lifecycle-cache flags on backends that don't use them (rather than silently
 	// ignoring them), keeping backend-specific flag support grouped with the backend.
 	UsesLifecycleCache bool
+	// SupportsPreviousImage indicates the backend honors --previous-image (the
+	// analyzer reads a prior image's layer metadata + SBOM so the exporter can reuse
+	// unchanged layers by reference). The docker-daemon backend sets this true. The
+	// buildkit backend sets it false: its build-then-finalize model already gets
+	// layer-blob reuse from BuildKit's content-addressed vertex cache (unchanged
+	// layers keep their digest and are not re-pushed), and finalize authors metadata
+	// from the ACTUAL produced layers rather than from a prior tag — so the only
+	// distinct benefit (metadata/SBOM continuity across a retag) is out of scope. The
+	// CLI rejects --previous-image on a backend where this is false rather than
+	// silently ignoring it.
+	SupportsPreviousImage bool
 }
 
 // Capabilities returns the declared capabilities for a backend type without
@@ -293,14 +304,16 @@ func (t BackendType) Capabilities() BackendCapabilities {
 			SupportsCacheMounts:  true,
 			SupportsParallelArch: true,
 			SupportsSecretMounts: true,
-			PushesNatively:       true,
-			UsesLifecycleCache:   false, // uses BuildKit's own cache (--buildkit-cache-*)
+			PushesNatively:        true,
+			UsesLifecycleCache:    false, // uses BuildKit's own cache (--buildkit-cache-*)
+			SupportsPreviousImage: false, // content-addressed cache covers layer reuse
 		}
 	case BackendDockerDaemon, BackendAuto, "":
 		return BackendCapabilities{
-			MaxPlatforms:       1, // single-arch only
-			PushesNatively:     false,
-			UsesLifecycleCache: true, // --cache / --cache-image / --clear-cache
+			MaxPlatforms:          1, // single-arch only
+			PushesNatively:        false,
+			UsesLifecycleCache:    true, // --cache / --cache-image / --clear-cache
+			SupportsPreviousImage: true, // --previous-image (analyzer reads prior image)
 		}
 	default:
 		// Unknown backend: be permissive on count (the factory will reject it).
