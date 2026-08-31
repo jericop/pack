@@ -1,12 +1,19 @@
 name: build
 
-# DISABLED for automatic runs in this fork. The upstream multi-OS build/release
-# pipeline (macOS/Windows/Linux + all-arch packaging) is replaced for the fork by
-# the Linux-only `fork-release.yml`. This workflow is kept intact for an easy
-# upstream re-sync but is manual-only (workflow_dispatch) so it does not consume
-# macOS/Windows runners on every release-branch push.
 on:
-  workflow_dispatch: {}
+  push:
+    branches:
+      - main
+      - 'release/**'
+  pull_request:
+    paths-ignore:
+      - '**.md'
+      - 'resources/**'
+      - 'CODEOWNERS'
+      - 'LICENSE'
+    branches:
+      - main
+      - 'release/**'
 
 jobs:
   test:

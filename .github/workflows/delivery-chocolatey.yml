@@ -1,9 +1,9 @@
 name: delivery / chocolatey
 
-# DISABLED in this fork. Publishes to the upstream Chocolatey feed using
-# secrets a fork does not have. The automatic `release: released` trigger is
-# removed (manual-only) and the job is gated behind ENABLE_PACKAGE_DELIVERY.
 on:
+  release:
+    types:
+      - released
   workflow_dispatch:
     inputs:
       tag_name:
@@ -19,7 +19,6 @@ defaults:
 
 jobs:
   deliver-chocolatey:
-    if: ${{ vars.ENABLE_PACKAGE_DELIVERY == 'true' }}
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4

@@ -1,9 +1,4 @@
 # Merges changes to release branches back into main.
-#
-# DISABLED by default in this fork: it auto-merges release/** back into main
-# using secrets.DEPLOY_KEY, which a fork does not have. Gated behind the
-# ENABLE_RELEASE_MERGE repo variable so it does not fail on every release-branch
-# push. Set ENABLE_RELEASE_MERGE=true to opt in.
 name: release-merge
 
 on:
@@ -13,7 +8,6 @@ on:
 
 jobs:
   merge:
-    if: ${{ vars.ENABLE_RELEASE_MERGE == 'true' }}
     runs-on: ubuntu-latest
     steps:
       - name: Merge

@@ -1,10 +1,24 @@
 name: compatibility
 
-# DISABLED for automatic runs in this fork (it was hanging and is not needed for
-# the experimental fork releases). Kept intact for upstream re-sync but made
-# manual-only (workflow_dispatch).
 on:
-  workflow_dispatch: {}
+  push:
+    paths-ignore:
+      - '**.md'
+      - 'resources/**'
+      - 'CODEOWNERS'
+      - 'LICENSE'
+    branches:
+      - main
+      - 'release/**'
+  pull_request:
+    paths-ignore:
+      - '**.md'
+      - 'resources/**'
+      - 'CODEOWNERS'
+      - 'LICENSE'
+    branches:
+      - main
+      - 'release/**'
 
 jobs:
   acceptance-combo:
