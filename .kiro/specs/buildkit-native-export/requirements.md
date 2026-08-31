@@ -376,9 +376,17 @@ dropped.
    per-backend branch — the same pattern `MaxPlatforms` uses for `--platform`.
    (IMPLEMENTED — verified: buildkit rejects `--cache`/`--cache-image`/`--clear-cache`;
    docker-daemon accepts them; buildkit accepts `--buildkit-cache-from`.)
-5. SBOM and report copy-out (`--sbom-output-dir`, `--report-output-dir`) SHALL either
-   extract the artifacts to the host (as the daemon backend does via CopyOut) or be
-   documented as unsupported on this backend. (NOT YET IMPLEMENTED.)
+5. SBOM and report copy-out (`--sbom-output-dir`, `--report-output-dir`) SHALL
+   extract the artifacts to the host, matching the daemon backend's CopyOut. The
+   exporter runs with `-report /layers/report.toml`; the backend reads
+   `/layers/report.toml` and the `/layers/sbom` tree out of the built LLB state via
+   the gateway `ReadFile`/`ReadDir` API and writes them to the destination dirs. For
+   MULTI-ARCH builds each platform's output is namespaced under `<dest>/<os>-<arch>/`
+   so platforms don't clobber each other; single-arch writes directly to `<dest>`.
+   Missing artifacts are tolerated (best-effort), matching the daemon backend.
+   (IMPLEMENTED — verified: `--report-output-dir` yields `report.toml`;
+   `--sbom-output-dir` yields the full `build/`+`launch/`+`cache/` SBOM tree
+   (cdx/spdx/syft), identical in shape to a daemon build.)
 6. `--volume` (user bind mounts) SHALL be honored or documented as unsupported.
    BuildKit's isolated build model has no direct daemon bind-mount equivalent; this
    is a design decision. (NOT YET IMPLEMENTED.)

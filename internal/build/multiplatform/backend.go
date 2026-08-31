@@ -232,6 +232,13 @@ type PlatformBuildOpts struct {
 	// AdditionalTags are extra tags to publish the image under (pack --tag). BuildKit
 	// pushes the image under all of them; finalize is run per tag.
 	AdditionalTags []string
+	// SBOMDestinationDir / ReportDestinationDir are host directories (pack
+	// --sbom-output-dir / --report-output-dir). When set, the backend extracts
+	// /layers/sbom and /layers/report.toml from the built image to these dirs
+	// (namespaced per platform for multi-arch), matching the daemon backend's
+	// copy-out.
+	SBOMDestinationDir   string
+	ReportDestinationDir string
 }
 
 // PlatformBuildResult describes the outcome of building for a single platform.

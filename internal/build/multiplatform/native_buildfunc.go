@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path"
+	"path/filepath"
 	"sort"
 	"strings"
 
@@ -83,12 +84,25 @@ type nativeBuildInputs struct {
 	// publishes the assembled image (see exporterImageAttrs) and finalize updates
 	// each tag.
 	additionalTags []string
+	// sbomDestDir / reportDestDir are host directories (pack --sbom-output-dir /
+	// --report-output-dir). When set, the backend reads /layers/sbom and
+	// /layers/report.toml out of the built LLB state and writes them here — the
+	// buildkit analog of the daemon backend's CopyOutTo. For multi-arch builds the
+	// output is namespaced per platform (<dest>/<os>-<arch>/...).
+	sbomDestDir   string
+	reportDestDir string
 }
 
 // contextLocalName is the llb.Local key under which pack provides the app source.
 const contextLocalName = "context"
 
 const emitDirNBF = "/emit"
+
+// reportTOMLPathNBF is where the exporter writes report.toml inside the build; the
+// backend reads it out for --report-output-dir. sbomDirNBF is the launch SBOM tree
+// the backend reads out for --sbom-output-dir.
+const reportTOMLPathNBF = "/layers/report.toml"
+const sbomDirNBF = "/layers/sbom"
 
 // makeNativeBuildFunc returns a gateway BuildFunc bound to the given inputs.
 func makeNativeBuildFunc(in nativeBuildInputs) client.BuildFunc {
@@ -156,6 +170,14 @@ func nativeBuildPlatform(ctx context.Context, c client.Client, in nativeBuildInp
 	var emitCfg emit.ImageConfig
 	if err := json.Unmarshal(cfgJSON, &emitCfg); err != nil {
 		return nil, nil, errors.Wrap(err, "parse emit config")
+	}
+
+	// Extract report.toml + the launch SBOM tree from the built state to the host
+	// (pack --report-output-dir / --sbom-output-dir), the buildkit analog of the
+	// daemon backend's CopyOutTo. Namespaced per-platform so multi-arch builds don't
+	// clobber each other. Best-effort: a missing report/sbom is not fatal.
+	if err := extractBuildArtifactsNBF(ctx, builtRef, in, p); err != nil {
+		return nil, nil, errors.Wrap(err, "extracting sbom/report output")
 	}
 
 	runRef, err := resolvedRunImageRefNBF(ctx, builtRef, in.runImage)
@@ -540,6 +562,9 @@ func buildEmitLLB(in nativeBuildInputs, p ocispecs.Platform) llb.State {
 	if in.defaultProcessType != "" {
 		exporterArgs = append(exporterArgs, "-process-type", in.defaultProcessType)
 	}
+	// Pin the report path so the backend can extract it (pack --report-output-dir).
+	// The exporter writes report.toml here even in emit-mode.
+	exporterArgs = append(exporterArgs, "-report", reportTOMLPathNBF)
 	exporterArgs = append(exporterArgs, "-layers", "/layers", "-app", "/workspace", "-emit-export-plan", emitDirNBF, in.imageName)
 	// Additional tags: the exporter takes args[1:] as extra names to record. In
 	// emit-mode the RecordingImage ignores them (nothing to push), so they carry no
@@ -558,4 +583,80 @@ func insecureRegistryArgsNBF(regs []string) []string {
 		out = append(out, "-insecure-registry", r)
 	}
 	return out
+}
+
+// extractBuildArtifactsNBF reads report.toml and the launch SBOM tree out of the
+// built LLB state and writes them to the host destination dirs (pack
+// --report-output-dir / --sbom-output-dir). It is the buildkit analog of the daemon
+// backend's CopyOutTo. For multi-arch builds each platform's output is namespaced
+// under <dest>/<os>-<arch>/ so platforms don't clobber each other; single-arch
+// writes directly to <dest>. Missing artifacts are not fatal (a build may legitimately
+// produce no SBOM), matching the daemon backend's best-effort copy-out.
+func extractBuildArtifactsNBF(ctx context.Context, ref client.Reference, in nativeBuildInputs, p ocispecs.Platform) error {
+	multi := len(in.platforms) > 1
+	subdir := ""
+	if multi {
+		subdir = fmt.Sprintf("%s-%s", p.OS, p.Architecture)
+	}
+
+	if in.reportDestDir != "" {
+		data, err := ref.ReadFile(ctx, client.ReadRequest{Filename: reportTOMLPathNBF})
+		if err == nil {
+			dest := filepath.Join(in.reportDestDir, subdir, "report.toml")
+			if werr := writeHostFileNBF(dest, data, 0644); werr != nil {
+				return werr
+			}
+		}
+		// A missing report.toml is tolerated (best-effort, like the daemon copy-out).
+	}
+
+	if in.sbomDestDir != "" {
+		destRoot := filepath.Join(in.sbomDestDir, subdir)
+		if err := copyRefTreeToHostNBF(ctx, ref, sbomDirNBF, destRoot); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// copyRefTreeToHostNBF recursively copies a directory tree from the built LLB state
+// (srcDir) to a host directory (destDir), using the gateway ReadDir/ReadFile API. A
+// missing srcDir is tolerated (no SBOM produced). Directory structure and file bytes
+// are preserved; permissions are normalized to 0644/0755.
+func copyRefTreeToHostNBF(ctx context.Context, ref client.Reference, srcDir, destDir string) error {
+	entries, err := ref.ReadDir(ctx, client.ReadDirRequest{Path: srcDir})
+	if err != nil {
+		// srcDir absent -> nothing to extract.
+		return nil
+	}
+	for _, e := range entries {
+		name := path.Base(e.Path)
+		srcPath := path.Join(srcDir, name)
+		destPath := filepath.Join(destDir, name)
+		if os.FileMode(e.Mode).IsDir() {
+			if rerr := copyRefTreeToHostNBF(ctx, ref, srcPath, destPath); rerr != nil {
+				return rerr
+			}
+			continue
+		}
+		data, rerr := ref.ReadFile(ctx, client.ReadRequest{Filename: srcPath})
+		if rerr != nil {
+			return errors.Wrapf(rerr, "reading %s from build", srcPath)
+		}
+		if werr := writeHostFileNBF(destPath, data, 0644); werr != nil {
+			return werr
+		}
+	}
+	return nil
+}
+
+// writeHostFileNBF writes data to a host path, creating parent dirs.
+func writeHostFileNBF(dest string, data []byte, mode os.FileMode) error {
+	if err := os.MkdirAll(filepath.Dir(dest), 0755); err != nil {
+		return errors.Wrapf(err, "creating output dir for %s", dest)
+	}
+	if err := os.WriteFile(dest, data, mode); err != nil {
+		return errors.Wrapf(err, "writing %s", dest)
+	}
+	return nil
 }

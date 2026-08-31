@@ -147,6 +147,8 @@ func (b *BuildkitBackend) driveNative(ctx context.Context, bkClient *client.Clie
 		noProxy:             opts.NoProxy,
 		defaultProcessType:  opts.DefaultProcessType,
 		additionalTags:      opts.AdditionalTags,
+		sbomDestDir:         opts.SBOMDestinationDir,
+		reportDestDir:       opts.ReportDestinationDir,
 	}
 	if reg := registryHost(opts.ImageName); reg != "" && isLikelyInsecureRegistry(reg) {
 		in.insecureRegistries = []string{reg}
