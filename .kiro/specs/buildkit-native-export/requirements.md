@@ -353,12 +353,18 @@ dropped.
    `-previous-image`, with the same-registry validation the daemon enforces under
    `--publish`). (NOT YET IMPLEMENTED — requires design work on how previous-image
    flows through the emit/finalize model; tracked below.)
-4. `--cache-image` (registry cache) SHALL be honored or explicitly mapped to the
-   buildkit-native cache mechanism. The buildkit backend uses BuildKit's own
-   vertex/layer cache (`--buildkit-cache-from`/`--buildkit-cache-to`) rather than the
-   lifecycle `-cache-image`; the intended behavior for `--cache-image` on this
-   backend is a design decision (map to buildkit registry cache, honor the lifecycle
-   cache-image, or reject with a clear error). (NOT YET IMPLEMENTED — tracked below.)
+4. The lifecycle-cache flags — `--cache`, `--cache-image`, and `--clear-cache` — are
+   DOCKER-DAEMON-SPECIFIC and SHALL be REJECTED (not silently ignored) on the
+   buildkit backend with a clear error pointing to the buildkit equivalents
+   (`--buildkit-cache-from` / `--buildkit-cache-to`). Rationale: the buildkit backend
+   uses BuildKit's own vertex/layer cache, and — because it only ever pushes to a
+   registry and never deletes from one — `--clear-cache` has no meaning. This
+   backend/flag grouping is expressed as a backend CAPABILITY
+   (`BackendCapabilities.UsesLifecycleCache`: true for docker-daemon, false for
+   buildkit), and the CLI enforces it from the capability rather than a hardcoded
+   per-backend branch — the same pattern `MaxPlatforms` uses for `--platform`.
+   (IMPLEMENTED — verified: buildkit rejects `--cache`/`--cache-image`/`--clear-cache`;
+   docker-daemon accepts them; buildkit accepts `--buildkit-cache-from`.)
 5. SBOM and report copy-out (`--sbom-output-dir`, `--report-output-dir`) SHALL either
    extract the artifacts to the host (as the daemon backend does via CopyOut) or be
    documented as unsupported on this backend. (NOT YET IMPLEMENTED.)

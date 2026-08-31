@@ -408,7 +408,43 @@ func validateBuildFlags(flags *BuildFlags, cfg config.Config, inputImageRef clie
 		return errors.Errorf("the %s backend supports a single --platform; use --build-backend buildkit to build multiple platforms in one image", backend)
 	}
 
+	// The lifecycle-cache flags (--cache / --cache-image / --clear-cache) belong to
+	// the docker-daemon backend. Registry-native backends (buildkit) use their own
+	// build-engine cache (--buildkit-cache-from / --buildkit-cache-to) and never
+	// delete anything from a registry, so --clear-cache is meaningless there. Reject
+	// these flags on a backend that does not use the lifecycle cache rather than
+	// silently ignoring them. This rule lives with the backend capability.
+	if !caps.UsesLifecycleCache {
+		var offending []string
+		if flags.CacheImage != "" {
+			offending = append(offending, "--cache-image")
+		}
+		if flags.ClearCache {
+			offending = append(offending, "--clear-cache")
+		}
+		if cacheFlagProvided(flags.Cache) {
+			offending = append(offending, "--cache")
+		}
+		if len(offending) > 0 {
+			return errors.Errorf(
+				"%s is not supported by the %s backend; it applies to the docker-daemon backend. Use --buildkit-cache-from / --buildkit-cache-to for buildkit build caching.",
+				strings.Join(offending, ", "), backend,
+			)
+		}
+	}
+
 	return nil
+}
+
+// cacheFlagProvided reports whether the user supplied a --cache option (any of the
+// build/launch/kaniko cache entries carries a source or a non-default format).
+func cacheFlagProvided(c cache.CacheOpts) bool {
+	for _, ci := range []cache.CacheInfo{c.Build, c.Launch, c.Kaniko} {
+		if ci.Source != "" || ci.Format != cache.CacheVolume {
+			return true
+		}
+	}
+	return false
 }
 
 // splitPlatforms flattens a repeatable --platform flag (each value may itself be

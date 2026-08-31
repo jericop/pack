@@ -270,6 +270,15 @@ type BackendCapabilities struct {
 	// (multi-platform) image via BuildKit's native image exporter — one
 	// image/index, no intermediate tags.
 	PushesNatively bool
+	// UsesLifecycleCache indicates the backend uses the lifecycle's cache model —
+	// the docker-daemon flags --cache / --cache-image / --clear-cache. The
+	// docker-daemon backend sets this true. Registry-native backends (buildkit,
+	// buildah) set it false: they use their own build-engine cache (for buildkit,
+	// --buildkit-cache-from/--buildkit-cache-to) and never delete anything from a
+	// registry, so --clear-cache is meaningless. The CLI uses this to reject the
+	// lifecycle-cache flags on backends that don't use them (rather than silently
+	// ignoring them), keeping backend-specific flag support grouped with the backend.
+	UsesLifecycleCache bool
 }
 
 // Capabilities returns the declared capabilities for a backend type without
@@ -285,11 +294,13 @@ func (t BackendType) Capabilities() BackendCapabilities {
 			SupportsParallelArch: true,
 			SupportsSecretMounts: true,
 			PushesNatively:       true,
+			UsesLifecycleCache:   false, // uses BuildKit's own cache (--buildkit-cache-*)
 		}
 	case BackendDockerDaemon, BackendAuto, "":
 		return BackendCapabilities{
-			MaxPlatforms:   1, // single-arch only
-			PushesNatively: false,
+			MaxPlatforms:       1, // single-arch only
+			PushesNatively:     false,
+			UsesLifecycleCache: true, // --cache / --cache-image / --clear-cache
 		}
 	default:
 		// Unknown backend: be permissive on count (the factory will reject it).

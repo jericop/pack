@@ -464,6 +464,33 @@ func testBuildCommand(t *testing.T, when spec.G, it spec.S) {
 			})
 		})
 
+		when("--build-backend buildkit is used with lifecycle-cache flags", func() {
+			it.Before(func() {
+				// The buildkit backend is experimental; enable it in config.
+				cfg = config.Config{Experimental: true}
+				command = commands.Build(logger, cfg, mockClient)
+			})
+
+			it("rejects --clear-cache with a pointer to the buildkit cache flags", func() {
+				command.SetArgs([]string{"--builder", "my-builder", "image", "--build-backend", "buildkit", "--publish", "--clear-cache"})
+				err := command.Execute()
+				h.AssertError(t, err, "--clear-cache is not supported by the buildkit backend")
+				h.AssertError(t, err, "--buildkit-cache-from")
+			})
+
+			it("rejects --cache-image", func() {
+				command.SetArgs([]string{"--builder", "my-builder", "image", "--build-backend", "buildkit", "--publish", "--cache-image", "reg/x:cache"})
+				err := command.Execute()
+				h.AssertError(t, err, "--cache-image is not supported by the buildkit backend")
+			})
+
+			it("rejects --cache", func() {
+				command.SetArgs([]string{"--builder", "my-builder", "image", "--build-backend", "buildkit", "--publish", "--cache", "type=build;format=image;name=reg/x:cache"})
+				err := command.Execute()
+				h.AssertError(t, err, "--cache is not supported by the buildkit backend")
+			})
+		})
+
 		when("a valid lifecycle-image is provided", func() {
 			when("only the image repo is provided", func() {
 				it("uses the provided lifecycle-image and parses it correctly", func() {

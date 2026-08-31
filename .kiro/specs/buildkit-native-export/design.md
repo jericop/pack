@@ -27,6 +27,20 @@ When no `--platform` is given, the build defaults to the HOST platform
 (`runtime.GOOS/GOARCH`) for both backends — the buildkit backend no longer defaults
 to the builder image's arch (which could force emulation on a non-amd64 host).
 
+Backend-specific FLAGS are grouped with the backend the same way, via capabilities
+rather than per-backend CLI branches. `BackendCapabilities.UsesLifecycleCache` is
+`true` for `docker-daemon` and `false` for `buildkit`: the lifecycle-cache flags
+`--cache`, `--cache-image`, and `--clear-cache` belong to the docker-daemon backend
+(the buildkit backend uses BuildKit's own vertex cache via `--buildkit-cache-from`/
+`--buildkit-cache-to` and never deletes from a registry, so `--clear-cache` is
+meaningless). The CLI rejects these flags on a backend whose `UsesLifecycleCache` is
+false with a message pointing to the buildkit equivalents, rather than silently
+ignoring them. `--tag` is universal (all registry backends can push multiple names)
+and IS supported by buildkit. Deciding NOT to overload `--cache` with buildkit cache
+config was deliberate: BuildKit's directional import/export + `mode`/`type` cache
+semantics do not map cleanly onto `--cache`'s `type=build/launch;format=...` grammar,
+and `--buildkit-cache-from`/`--buildkit-cache-to` already mirror `docker buildx`.
+
 The `BuildBackend` interface / `BackendType` enum / factory / `--build-backend` flag
 are retained for the future `buildah` backend.
 
