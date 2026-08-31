@@ -22,6 +22,7 @@ import (
 	"github.com/pkg/errors"
 	"golang.org/x/sync/errgroup"
 
+	"github.com/buildpacks/lifecycle/api"
 	"github.com/buildpacks/lifecycle/phase/emit"
 	"github.com/buildpacks/lifecycle/platform/files"
 )
@@ -96,6 +97,13 @@ type nativeBuildInputs struct {
 	// /platform/bindings/<Name> on the detector + builder RUNs — mounted, not copied,
 	// so binding secrets never land in a layer.
 	bindings []BindingMount
+	// workspace is the app dir mount path inside the build (pack --workspace),
+	// default /workspace. The app source is copied here and every phase runs with
+	// -app <workspace>.
+	workspace string
+	// execEnv is the CNB execution environment (pack --exec-env, e.g. production/
+	// test/development). Passed as CNB_EXEC_ENV when the platform API is >= 0.15.
+	execEnv string
 }
 
 // bindingLocalName returns the llb.Local key (and SolveOpt.LocalMounts key) for a
@@ -485,11 +493,11 @@ func buildEmitLLB(in nativeBuildInputs, p ocispecs.Platform) llb.State {
 
 	appSrc := llb.Local(contextLocalName)
 	base = base.File(
-		llb.Copy(appSrc, "/", "/workspace", &llb.CopyInfo{CreateDestPath: true, AllowWildcard: true, AllowEmptyWildcard: true}),
+		llb.Copy(appSrc, "/", in.workspace, &llb.CopyInfo{CreateDestPath: true, AllowWildcard: true, AllowEmptyWildcard: true}),
 		llb.WithCustomNamef("[%s] copy app source", plat),
 	)
 	base = base.Run(
-		llb.Args([]string{"/bin/sh", "-c", "chmod -R 777 /workspace"}),
+		llb.Args([]string{"/bin/sh", "-c", "chmod -R 777 " + in.workspace}),
 		llb.WithCustomNamef("[%s] fix workspace permissions", plat),
 	).Root()
 
@@ -529,6 +537,13 @@ func buildEmitLLB(in nativeBuildInputs, p ocispecs.Platform) llb.State {
 	}
 	if in.sourceDateEpoch != "" {
 		env = append(env, llb.AddEnv("SOURCE_DATE_EPOCH", in.sourceDateEpoch))
+	}
+	// CNB_EXEC_ENV (pack --exec-env) is a Platform API >= 0.15 feature: the lifecycle
+	// exposes it to detect/build so buildpacks can behave per-environment and
+	// detection can filter by a buildpack's declared exec-env list. Only set it on a
+	// qualifying platform API, matching the daemon backend's If(AtLeast("0.15")) gate.
+	if in.execEnv != "" && platformAPIAtLeastNBF(in.platformAPI, "0.15") {
+		env = append(env, llb.AddEnv("CNB_EXEC_ENV", in.execEnv))
 	}
 	// Proxy vars (both UPPER and lower case), matching standard pack's
 	// WithLifecycleProxy, so buildpacks that download dependencies work behind a proxy.
@@ -571,7 +586,7 @@ func buildEmitLLB(in nativeBuildInputs, p ocispecs.Platform) llb.State {
 	analyzerArgs = append(analyzerArgs, "-run-image", in.runImage, "-layers", "/layers", in.imageName)
 	base = base.Run(append([]llb.RunOption{llb.Args(analyzerArgs), llb.WithCustomNamef("[%s] lifecycle: analyzer", plat), cacheMount}, env...)...).Root()
 
-	detectorOpts := append([]llb.RunOption{llb.Args([]string{"/cnb/lifecycle/detector", "-app", "/workspace", "-layers", "/layers"}), llb.WithCustomNamef("[%s] lifecycle: detector", plat)}, env...)
+	detectorOpts := append([]llb.RunOption{llb.Args([]string{"/cnb/lifecycle/detector", "-app", in.workspace, "-layers", "/layers"}), llb.WithCustomNamef("[%s] lifecycle: detector", plat)}, env...)
 	detectorOpts = append(detectorOpts, bindingMounts...)
 	base = base.Run(detectorOpts...).Root()
 
@@ -579,7 +594,7 @@ func buildEmitLLB(in nativeBuildInputs, p ocispecs.Platform) llb.State {
 	restorerArgs = append(restorerArgs, "-layers", "/layers")
 	base = base.Run(append([]llb.RunOption{llb.Args(restorerArgs), llb.WithCustomNamef("[%s] lifecycle: restorer", plat), cacheMount}, env...)...).Root()
 
-	builderOpts := append([]llb.RunOption{llb.Args([]string{"/cnb/lifecycle/builder", "-app", "/workspace", "-layers", "/layers"}), llb.WithCustomNamef("[%s] lifecycle: builder", plat)}, env...)
+	builderOpts := append([]llb.RunOption{llb.Args([]string{"/cnb/lifecycle/builder", "-app", in.workspace, "-layers", "/layers"}), llb.WithCustomNamef("[%s] lifecycle: builder", plat)}, env...)
 	builderOpts = append(builderOpts, bindingMounts...)
 	base = base.Run(builderOpts...).Root()
 
@@ -591,7 +606,7 @@ func buildEmitLLB(in nativeBuildInputs, p ocispecs.Platform) llb.State {
 	// Pin the report path so the backend can extract it (pack --report-output-dir).
 	// The exporter writes report.toml here even in emit-mode.
 	exporterArgs = append(exporterArgs, "-report", reportTOMLPathNBF)
-	exporterArgs = append(exporterArgs, "-layers", "/layers", "-app", "/workspace", "-emit-export-plan", emitDirNBF, in.imageName)
+	exporterArgs = append(exporterArgs, "-layers", "/layers", "-app", in.workspace, "-emit-export-plan", emitDirNBF, in.imageName)
 	// Additional tags: the exporter takes args[1:] as extra names to record. In
 	// emit-mode the RecordingImage ignores them (nothing to push), so they carry no
 	// effect here beyond being recorded; the backend applies them at publish time via
@@ -609,6 +624,16 @@ func insecureRegistryArgsNBF(regs []string) []string {
 		out = append(out, "-insecure-registry", r)
 	}
 	return out
+}
+
+// platformAPIAtLeastNBF reports whether the given platform API string is >= min.
+// A malformed/empty version is treated as "not at least" (conservative).
+func platformAPIAtLeastNBF(platformAPI, min string) bool {
+	v, err := api.NewVersion(platformAPI)
+	if err != nil {
+		return false
+	}
+	return v.AtLeast(min)
 }
 
 // extractBuildArtifactsNBF reads report.toml and the launch SBOM tree out of the

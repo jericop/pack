@@ -126,14 +126,30 @@ func (b *BuildkitBackend) driveNative(ctx context.Context, bkClient *client.Clie
 	// package/image: pack drives the gateway API directly with its own BuildFunc
 	// (nativeBuildFunc), which assembles FROM run-image via llb.Copy from the
 	// emitted layer sources and sets the image config + build-metadata label.
+	// Effective uid/gid: the user's --uid/--gid override (>= 0) wins over the builder's
+	// own UID/GID, matching the daemon backend's -uid/-gid override semantics.
+	effUID := opts.BuilderUID
+	if opts.OverrideUID >= 0 {
+		effUID = opts.OverrideUID
+	}
+	effGID := opts.BuilderGID
+	if opts.OverrideGID >= 0 {
+		effGID = opts.OverrideGID
+	}
+	// Workspace: default to /workspace when unset.
+	workspace := opts.Workspace
+	if workspace == "" {
+		workspace = "/workspace"
+	}
+
 	in := nativeBuildInputs{
 		builderImage: opts.BuilderImage,
 		runImage:     opts.RunImage,
 		imageName:    opts.ImageName,
 		platforms:    ocispecsPlatforms(platforms),
 		platformAPI:  opts.PlatformAPI,
-		uid:          opts.BuilderUID,
-		gid:          opts.BuilderGID,
+		uid:          effUID,
+		gid:          effGID,
 		orderTOML:           opts.OrderToml,
 		registryAuth:        opts.RegistryAuth,
 		stackID:             opts.StackID,
@@ -150,6 +166,8 @@ func (b *BuildkitBackend) driveNative(ctx context.Context, bkClient *client.Clie
 		sbomDestDir:         opts.SBOMDestinationDir,
 		reportDestDir:       opts.ReportDestinationDir,
 		bindings:            opts.Bindings,
+		workspace:           workspace,
+		execEnv:             opts.ExecutionEnv,
 	}
 	if reg := registryHost(opts.ImageName); reg != "" && isLikelyInsecureRegistry(reg) {
 		in.insecureRegistries = []string{reg}

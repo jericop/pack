@@ -1021,6 +1021,10 @@ func (c *Client) buildMultiPlatform(ctx context.Context, opts BuildOptions, life
 		SBOMDestinationDir:   opts.SBOMDestinationDir,
 		ReportDestinationDir: opts.ReportDestinationDir,
 		Bindings:             bindings,
+		OverrideUID:          opts.UserID,
+		OverrideGID:          opts.GroupID,
+		Workspace:            opts.Workspace,
+		ExecutionEnv:         opts.CNBExecutionEnv,
 	}
 
 	// If the user explicitly passed --lifecycle-image, use it regardless of trust mode

@@ -243,6 +243,17 @@ type PlatformBuildOpts struct {
 	// /platform/bindings/<name> in the lifecycle RUNs. Each host dir is synced in as
 	// an llb.Local and mounted (not copied) so binding secrets never land in a layer.
 	Bindings []BindingMount
+	// OverrideUID / OverrideGID are the user's --uid / --gid overrides. A value >= 0
+	// overrides the builder's own UID/GID for the lifecycle (matching the daemon
+	// backend's -uid/-gid); < 0 means "unset, use the builder's BuilderUID/BuilderGID".
+	OverrideUID int
+	OverrideGID int
+	// Workspace is the app dir mount path inside the build (pack --workspace); empty
+	// means the default /workspace.
+	Workspace string
+	// ExecutionEnv is the CNB execution environment (pack --exec-env). Passed as
+	// CNB_EXEC_ENV when the platform API is >= 0.15.
+	ExecutionEnv string
 }
 
 // BindingMount is a CNB service binding: a host directory exposed read-only under
