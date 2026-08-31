@@ -897,7 +897,16 @@ func (c *Client) Build(ctx context.Context, opts BuildOptions) error {
 			// fall back to the builder image's default arch here.
 			opts.Platforms = []string{runtime.GOOS + "/" + runtime.GOARCH}
 		}
-		return c.buildMultiPlatform(ctx, opts, lifecycleOpts, appPath, runImageName)
+		// Stage the user-supplied buildpack modules (--buildpack/--pre-buildpack/
+		// --post-buildpack, incl. urn:cnb:registry + local refs) so the buildkit
+		// backend can sync them into the builder over LLB. from=builder / id-only
+		// refs contribute no content and are absent from fetchedBPs.
+		extraBPDir, cleanupExtraBPs, err := stageExtraBuildpacks(fetchedBPs)
+		if err != nil {
+			return err
+		}
+		defer cleanupExtraBPs()
+		return c.buildMultiPlatform(ctx, opts, lifecycleOpts, appPath, runImageName, extraBPDir, order, orderExtensions)
 	}
 
 	// docker-daemon backend: standard container-based build against the daemon.
@@ -911,7 +920,7 @@ func (c *Client) Build(ctx context.Context, opts BuildOptions) error {
 // buildMultiPlatform handles the multi-platform build path using BuildKit.
 // It constructs lifecycle phase commands, selects the appropriate backend,
 // and dispatches the build to the multi-platform executor.
-func (c *Client) buildMultiPlatform(ctx context.Context, opts BuildOptions, lifecycleOpts build.LifecycleOptions, appPath string, runImageName string) error {
+func (c *Client) buildMultiPlatform(ctx context.Context, opts BuildOptions, lifecycleOpts build.LifecycleOptions, appPath string, runImageName string, extraBuildpacksDir string, order dist.Order, orderExtensions dist.Order) error {
 	platforms, err := multiplatform.ParsePlatformList(opts.Platforms)
 	if err != nil {
 		return fmt.Errorf("parsing platforms: %w", err)
@@ -922,14 +931,20 @@ func (c *Client) buildMultiPlatform(ctx context.Context, opts BuildOptions, life
 		c.logger.Info("Multi-platform build without --publish: images will be built but not pushed. Use --publish to create a manifest list.")
 	}
 
-	// The Dockerfile references the original remote builder image (not pack.local/).
-	// Always extract and inject the builder's order into the Dockerfile to ensure
-	// consistent detection behavior across platforms.
+	// Order.toml written into the builder over LLB. Use the SAME resolved order
+	// processBuildpacks computed (builder + descriptor + --buildpack + pre/post,
+	// with the identical precedence the daemon backend uses) and serialize it with
+	// pack's canonical builder.OrderTOML — NOT a re-derivation from the builder's
+	// order label. This guarantees the buildkit detection order matches the daemon's
+	// and keeps a single source of truth for both the ordering decision and its
+	// serialization.
 	var orderToml string
-	orderLabel, err := lifecycleOpts.Builder.Image().Label("io.buildpacks.buildpack.order")
-	if err == nil && orderLabel != "" {
-		orderToml = convertOrderJSONToTOML(orderLabel)
-		c.logger.Debugf("Injecting buildpack order into Dockerfile")
+	if len(order) > 0 && len(order[0].Group) > 0 {
+		orderToml, err = builder.OrderTOML(order, orderExtensions)
+		if err != nil {
+			return fmt.Errorf("serializing buildpack order: %w", err)
+		}
+		c.logger.Debugf("Injecting resolved buildpack order into the buildkit builder")
 	}
 
 	// Construct the lifecycle phase commands from the lifecycle options
@@ -997,10 +1012,10 @@ func (c *Client) buildMultiPlatform(ctx context.Context, opts BuildOptions, life
 		BuilderUID:       lifecycleOpts.Builder.UID(),
 		BuilderGID:       lifecycleOpts.Builder.GID(),
 		PlatformAPI:      negotiatePlatformAPI(lifecycleOpts),
-		FileFilter:       nil,
+		FileFilter:       lifecycleOpts.FileFilter,
 		Network:          opts.ContainerConfig.Network,
-		BuildpackImages:  resolveBuildpackImages(opts),
-		OrderToml:        orderToml,
+		ExtraBuildpacksDir: extraBuildpacksDir,
+		OrderToml:          orderToml,
 		ClearCache:       opts.ClearCache,
 		RegistryAuth:     buildRegistryAuth(c.keychain, lifecycleOpts),
 		// Advertise the builder's stack id + OS distro to the lifecycle/buildpacks so
@@ -1278,71 +1293,101 @@ func negotiatePlatformAPI(opts build.LifecycleOptions) string {
 	return build.SupportedPlatformAPIVersions[len(build.SupportedPlatformAPIVersions)-1].String()
 }
 
-// resolveBuildpackImages extracts image references from the user-provided buildpack strings.
-// Only image-style references (not local paths or URIs) are included, as those are the ones
-// that can be referenced in a Dockerfile FROM instruction.
-func resolveBuildpackImages(opts BuildOptions) []string {
-	var images []string
-	allBPs := append(opts.PreBuildpacks, opts.Buildpacks...)
-	allBPs = append(allBPs, opts.PostBuildpacks...)
-
-	for _, bp := range allBPs {
-		// Skip local paths and URIs — only include image references
-		// Image references look like "docker.io/paketo-buildpacks/go" or "paketo-buildpacks/go:4.19"
-		// Local paths contain "/" at the start or "." or end in ".tar"/".tgz"
-		if bp == "" {
-			continue
-		}
-		if strings.HasPrefix(bp, ".") || strings.HasPrefix(bp, "/") {
-			continue
-		}
-		if strings.HasSuffix(bp, ".tar") || strings.HasSuffix(bp, ".tgz") || strings.HasSuffix(bp, ".tar.gz") {
-			continue
-		}
-		// If it contains "://" it's a URI, not an image reference
-		if strings.Contains(bp, "://") {
-			continue
-		}
-		// Registry URNs like "urn:cnb:registry:paketo-buildpacks/go" are not image refs
-		if strings.HasPrefix(bp, "urn:") {
-			continue
-		}
-		images = append(images, bp)
+// stageExtraBuildpacks materializes the user-supplied buildpack modules (the
+// modules FETCHED for --buildpack / --pre-buildpack / --post-buildpack, including
+// urn:cnb:registry and local-tarball/dir refs — resolved uniformly by
+// processBuildpacks) into a single staging directory laid out exactly as the CNB
+// distribution spec expects them inside the builder: /cnb/buildpacks/{id}/{ver}/*.
+//
+// The buildkit backend has already pulled the builder as a content-addressed
+// llb.Image; it syncs this staging dir in and llb.Copy's it over the builder's
+// /cnb/buildpacks before detect, so an added buildpack participates and a
+// same-id/version buildpack OVERRIDES the builder's copy (the "test a local
+// buildpack change" use case). These modules live only in the transient builder
+// state — the final image is assembled FROM the run image, so they never leak into
+// the output. It returns the staging dir ("" when there are no extra modules) and a
+// cleanup func the caller must defer.
+//
+// fetchedBPs contains only modules that were actually downloaded/read (from=builder
+// / id-only references produce no content and are not present here), so every
+// module here has real content to inject.
+func stageExtraBuildpacks(fetchedBPs []buildpack.BuildModule) (dir string, cleanup func(), err error) {
+	if len(fetchedBPs) == 0 {
+		return "", func() {}, nil
 	}
-	return images
+	stageDir, err := os.MkdirTemp("", "pack-bk-extra-bps")
+	if err != nil {
+		return "", func() {}, errors.Wrap(err, "creating buildpack staging dir")
+	}
+	cleanup = func() { _ = os.RemoveAll(stageDir) }
+
+	for _, bp := range fetchedBPs {
+		if err := extractModuleToDir(bp, stageDir); err != nil {
+			cleanup()
+			return "", func() {}, errors.Wrapf(err, "staging buildpack %s", bp.Descriptor().Info().FullName())
+		}
+	}
+	return stageDir, cleanup, nil
 }
 
-// convertOrderJSONToTOML converts the builder's order label (JSON) to TOML format
-// for writing to /cnb/order.toml in the Dockerfile.
-func convertOrderJSONToTOML(orderJSON string) string {
-	type groupEntry struct {
-		ID       string `json:"id"`
-		Version  string `json:"version"`
-		Optional bool   `json:"optional,omitempty"`
+// extractModuleToDir untars a BuildModule (whose Open() yields a tar with entries
+// under /cnb/buildpacks/{id}/{version}/*) into destDir, preserving the relative
+// paths so destDir mirrors the on-builder filesystem. Paths are cleaned and guarded
+// against traversal outside destDir.
+func extractModuleToDir(module buildpack.BuildModule, destDir string) error {
+	rc, err := module.Open()
+	if err != nil {
+		return errors.Wrap(err, "opening module")
 	}
-	type orderEntry struct {
-		Group []groupEntry `json:"group"`
-	}
+	defer rc.Close()
 
-	var order []orderEntry
-	if err := json.Unmarshal([]byte(orderJSON), &order); err != nil {
-		return ""
-	}
-
-	var b strings.Builder
-	for _, entry := range order {
-		b.WriteString("[[order]]\n")
-		for _, g := range entry.Group {
-			b.WriteString("  [[order.group]]\n")
-			b.WriteString(fmt.Sprintf("    id = %q\n", g.ID))
-			b.WriteString(fmt.Sprintf("    version = %q\n", g.Version))
-			if g.Optional {
-				b.WriteString("    optional = true\n")
-			}
+	tr := tar.NewReader(rc)
+	for {
+		hdr, err := tr.Next()
+		if err == io.EOF {
+			return nil
 		}
-		b.WriteString("\n")
+		if err != nil {
+			return errors.Wrap(err, "reading module tar")
+		}
+		// Normalize a leading slash so /cnb/... becomes cnb/... joined under destDir.
+		clean := filepath.Clean("/" + hdr.Name)
+		target := filepath.Join(destDir, clean)
+		// Guard against path traversal.
+		if !strings.HasPrefix(target, filepath.Clean(destDir)+string(os.PathSeparator)) && target != filepath.Clean(destDir) {
+			return errors.Errorf("module tar entry %q escapes staging dir", hdr.Name)
+		}
+		switch hdr.Typeflag {
+		case tar.TypeDir:
+			if err := os.MkdirAll(target, os.FileMode(hdr.Mode)|0o111); err != nil {
+				return errors.Wrapf(err, "mkdir %s", target)
+			}
+		case tar.TypeReg:
+			if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+				return errors.Wrapf(err, "mkdir parent of %s", target)
+			}
+			fh, err := os.OpenFile(target, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, os.FileMode(hdr.Mode))
+			if err != nil {
+				return errors.Wrapf(err, "create %s", target)
+			}
+			if _, err := io.Copy(fh, tr); err != nil { //nolint:gosec // module tars are pack-produced, sizes bounded by the buildpack
+				fh.Close()
+				return errors.Wrapf(err, "write %s", target)
+			}
+			fh.Close()
+		case tar.TypeSymlink:
+			if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+				return errors.Wrapf(err, "mkdir parent of symlink %s", target)
+			}
+			// Best-effort: recreate the symlink as recorded in the module tar.
+			_ = os.Remove(target)
+			if err := os.Symlink(hdr.Linkname, target); err != nil {
+				return errors.Wrapf(err, "symlink %s -> %s", target, hdr.Linkname)
+			}
+		default:
+			// Skip other entry types (hardlinks/devices are not expected in module tars).
+		}
 	}
-	return b.String()
 }
 
 func usesContainerdStorage(docker DockerClient) bool {

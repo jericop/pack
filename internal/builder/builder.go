@@ -1165,6 +1165,15 @@ func orderFileContents(order dist.Order, orderExt dist.Order) (string, error) {
 	return buf.String(), nil
 }
 
+// OrderTOML serializes a resolved order (and extension order) to the canonical
+// /cnb/order.toml contents pack writes into a builder. It is the single source of
+// truth for order.toml formatting; callers that need the order.toml text (e.g. the
+// buildkit backend, which writes it into the builder over LLB) MUST use this rather
+// than re-deriving TOML from the builder's order label, so the two never diverge.
+func OrderTOML(order dist.Order, orderExt dist.Order) (string, error) {
+	return orderFileContents(order, orderExt)
+}
+
 func (b *Builder) systemLayer(system dist.System, dest string) (string, error) {
 	contents, err := systemFileContents(system)
 	if err != nil {

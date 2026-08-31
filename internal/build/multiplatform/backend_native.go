@@ -10,6 +10,7 @@ import (
 	"github.com/moby/buildkit/util/entitlements"
 	ocispecs "github.com/opencontainers/image-spec/specs-go/v1"
 	"github.com/tonistiigi/fsutil"
+	fstypes "github.com/tonistiigi/fsutil/types"
 
 	"github.com/buildpacks/lifecycle/phase/finalize"
 
@@ -119,6 +120,25 @@ func (b *BuildkitBackend) driveNative(ctx context.Context, bkClient *client.Clie
 	if err != nil {
 		return nil, fmt.Errorf("creating local FS for app path %s: %w", opts.AppPath, err)
 	}
+	// project.toml [build] include/exclude (pack --descriptor): honor the same file
+	// filter the daemon backend applies when taring the app dir, so excluded files
+	// never sync into the build context. The filter is a keep-predicate
+	// (true = include); bridge it to fsutil's per-path Map. Paths from fsutil are
+	// relative to opts.AppPath with no leading slash, matching the daemon's CopyDir.
+	if opts.FileFilter != nil {
+		filter := opts.FileFilter
+		appFS, err = fsutil.NewFilterFS(appFS, &fsutil.FilterOpt{
+			Map: func(p string, _ *fstypes.Stat) fsutil.MapResult {
+				if filter(p) {
+					return fsutil.MapResultKeep
+				}
+				return fsutil.MapResultExclude
+			},
+		})
+		if err != nil {
+			return nil, fmt.Errorf("applying project descriptor file filter: %w", err)
+		}
+	}
 
 	authProvider := newDockerAuthProvider()
 
@@ -168,6 +188,7 @@ func (b *BuildkitBackend) driveNative(ctx context.Context, bkClient *client.Clie
 		bindings:            opts.Bindings,
 		workspace:           workspace,
 		execEnv:             opts.ExecutionEnv,
+		hasExtraBuildpacks:  opts.ExtraBuildpacksDir != "",
 	}
 	if reg := registryHost(opts.ImageName); reg != "" && isLikelyInsecureRegistry(reg) {
 		in.insecureRegistries = []string{reg}
@@ -187,6 +208,16 @@ func (b *BuildkitBackend) driveNative(ctx context.Context, bkClient *client.Clie
 			return nil, fmt.Errorf("creating local FS for binding %q (%s): %w", b.Name, b.HostPath, ferr)
 		}
 		localMounts[bindingLocalName(b.Name)] = bindFS
+	}
+	// Extra buildpack modules (--buildpack / --pre-buildpack / --post-buildpack):
+	// synced in as one local and copied over the builder's /cnb/buildpacks (see
+	// buildEmitLLB). Present only when the user supplied additional buildpacks.
+	if opts.ExtraBuildpacksDir != "" {
+		bpFS, ferr := fsutil.NewFS(opts.ExtraBuildpacksDir)
+		if ferr != nil {
+			return nil, fmt.Errorf("creating local FS for extra buildpacks dir %s: %w", opts.ExtraBuildpacksDir, ferr)
+		}
+		localMounts[extraBuildpacksLocalName] = bpFS
 	}
 
 	solveOpt := client.SolveOpt{

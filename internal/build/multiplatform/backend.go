@@ -177,11 +177,16 @@ type PlatformBuildOpts struct {
 	// Network is the network mode for the build.
 	Network string
 
-	// BuildpackImages is the list of additional buildpack OCI image references to add to the builder.
-	// These are COPYed from multi-stage FROM instructions in the generated Dockerfile,
-	// allowing the remote buildkit builder to pull them directly without needing a local
-	// ephemeral builder image.
-	BuildpackImages []string
+	// ExtraBuildpacksDir is a host directory (staged by pack) laid out as
+	// /cnb/buildpacks/{id}/{version}/* containing the user-supplied buildpack modules
+	// (--buildpack / --pre-buildpack / --post-buildpack, including urn:cnb:registry and
+	// local tarball/dir refs). When set, the backend syncs it in as an llb.Local and
+	// COPYs it over the builder's /cnb/buildpacks before detect, so added buildpacks
+	// participate and same-id/version buildpacks OVERRIDE the builder's copy. Empty when
+	// no extra buildpacks were requested. These modules only ever exist in the transient
+	// builder state; the final image is assembled FROM the run image, so they never leak
+	// into the output.
+	ExtraBuildpacksDir string
 
 	// OrderToml is the custom order.toml content to write into the builder.
 	// When additional buildpacks are specified, this defines the detection order.

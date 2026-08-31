@@ -8,7 +8,9 @@ import (
 	"path"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
+	"time"
 
 	"github.com/BurntSushi/toml"
 	ggcrname "github.com/google/go-containerregistry/pkg/name"
@@ -101,6 +103,13 @@ type nativeBuildInputs struct {
 	// default /workspace. The app source is copied here and every phase runs with
 	// -app <workspace>.
 	workspace string
+	// hasExtraBuildpacks indicates the user supplied additional buildpack modules
+	// (--buildpack / --pre-buildpack / --post-buildpack). When true, buildEmitLLB
+	// syncs the staged modules (llb.Local(extraBuildpacksLocalName), a tree rooted at
+	// /cnb/buildpacks/...) and copies them over the builder's /cnb/buildpacks before
+	// detect, so added buildpacks participate and same-id/version modules override the
+	// builder's copy. The staging dir is provided by the backend as a local mount.
+	hasExtraBuildpacks bool
 	// execEnv is the CNB execution environment (pack --exec-env, e.g. production/
 	// test/development). Passed as CNB_EXEC_ENV when the platform API is >= 0.15.
 	execEnv string
@@ -112,6 +121,11 @@ func bindingLocalName(name string) string { return "cnb-binding-" + name }
 
 // contextLocalName is the llb.Local key under which pack provides the app source.
 const contextLocalName = "context"
+
+// extraBuildpacksLocalName is the llb.Local key (and SolveOpt.LocalMounts key) under
+// which pack provides the staged extra buildpack modules (tree rooted at
+// /cnb/buildpacks/...). Copied over the builder's /cnb/buildpacks before detect.
+const extraBuildpacksLocalName = "cnb-extra-buildpacks"
 
 const emitDirNBF = "/emit"
 
@@ -218,6 +232,19 @@ func nativeBuildPlatform(ctx context.Context, c client.Client, in nativeBuildInp
 		img.Config.Labels = map[string]string{}
 	}
 	img.Config.Labels[emit.BuildMetadataLabel] = bmJSON
+
+	// --creation-time: set the image config's `created` timestamp from
+	// SOURCE_DATE_EPOCH. On the daemon backend the exporter does this via
+	// WithCreatedAt, but the buildkit path runs the exporter in emit-mode (a
+	// RecordingImage that never pushes), so the timestamp would otherwise be lost —
+	// finalize only rewrites labels and preserves whatever `created` we set here.
+	// Gated on Platform API >= 0.9, matching the daemon backend's AtLeast("0.9").
+	if in.sourceDateEpoch != "" && platformAPIAtLeastNBF(in.platformAPI, "0.9") {
+		if secs, perr := strconv.ParseInt(in.sourceDateEpoch, 10, 64); perr == nil {
+			t := time.Unix(secs, 0).UTC()
+			img.Created = &t
+		}
+	}
 
 	cfgOut, err := json.Marshal(img)
 	if err != nil {
@@ -469,6 +496,31 @@ func buildEmitLLB(in nativeBuildInputs, p ocispecs.Platform) llb.State {
 			llb.WithCustomNamef("[%s] write order.toml", plat),
 			llb.User("0:0"),
 		).Root()
+	}
+
+	// Extra buildpack modules (--buildpack / --pre-buildpack / --post-buildpack):
+	// the staged tree is rooted at /cnb/buildpacks/... so copying it over the
+	// builder's /cnb/buildpacks adds new modules and OVERRIDES same-id/version ones
+	// (the "test a local buildpack change" use case). This runs before detect, and
+	// only mutates the transient builder state — the final image is assembled FROM
+	// the run image, so these modules never enter the output. Copying (vs mounting)
+	// is intentional: the modules must persist through the detect/build RUNs.
+	if in.hasExtraBuildpacks {
+		bpSrc := llb.Local(extraBuildpacksLocalName)
+		base = base.File(
+			// CopyDirContentsOnly is REQUIRED: /cnb/buildpacks already exists in the
+			// builder, and BuildKit's Copy otherwise nests the source dir UNDER the
+			// destination (yielding /cnb/buildpacks/buildpacks/...). Copying contents
+			// merges the staged {id}/{version}/* trees INTO the builder's existing
+			// /cnb/buildpacks so the order.toml references resolve.
+			llb.Copy(bpSrc, "/cnb/buildpacks", "/cnb/buildpacks", &llb.CopyInfo{
+				CreateDestPath:      true,
+				AllowWildcard:       true,
+				AllowEmptyWildcard:  true,
+				CopyDirContentsOnly: true,
+			}),
+			llb.WithCustomNamef("[%s] add user buildpacks", plat),
+		)
 	}
 
 	// Write the user-supplied build-time env vars as files under /platform/env/<NAME>
