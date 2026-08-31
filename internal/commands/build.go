@@ -48,7 +48,6 @@ type BuildFlags struct {
 	BuildkitBuilder           string
 	BuildkitCacheFrom         []string
 	BuildkitCacheTo           []string
-	FixImageMetadata          bool
 	Policy                    string
 	Network                   string
 	DescriptorPath            string
@@ -91,18 +90,6 @@ func Build(logger logging.Logger, cfg config.Config, packClient PackClient) *cob
 			inputImageName := client.ParseInputImageReference(args[0])
 			if err := validateBuildFlags(&flags, cfg, inputImageName, logger); err != nil {
 				return err
-			}
-
-			// Self-healing short-circuit: --fix-image-metadata does NOT
-			// build. It re-applies CNB metadata to an EXISTING pushed image (the
-			// image-name argument), authoring it from the image's actual layers +
-			// the prepared-metadata label. No builder, app path, or run image is
-			// needed.
-			if flags.FixImageMetadata {
-				if flags.BuildBackend != "" && flags.BuildBackend != string(multiplatform.BackendBuildkit) {
-					return errors.Errorf("--fix-image-metadata is only valid with --build-backend %s", multiplatform.BackendBuildkit)
-				}
-				return multiplatform.FixRemoteImageMetadata(cmd.Context(), logger, inputImageName.Name(), false)
 			}
 
 			inputPreviousImage := client.ParseInputImageReference(flags.PreviousImage)
@@ -314,7 +301,6 @@ This option may set DOCKER_HOST environment variable for the build container if 
 	cmd.Flags().StringVar(&buildFlags.BuildkitBuilder, "buildkit-builder", "", `Name of the buildx builder to use for multi-platform builds (default: current buildx default).`)
 	cmd.Flags().StringArrayVar(&buildFlags.BuildkitCacheFrom, "buildkit-cache-from", nil, `External cache source for buildkit (e.g., "type=registry,ref=myapp-cache:latest").`)
 	cmd.Flags().StringArrayVar(&buildFlags.BuildkitCacheTo, "buildkit-cache-to", nil, `External cache destination for buildkit (e.g., "type=registry,ref=myapp-cache:latest,mode=max").`)
-	cmd.Flags().BoolVar(&buildFlags.FixImageMetadata, "fix-image-metadata", false, `[experimental] Self-healing: do NOT build. Apply CNB metadata to an EXISTING pushed image (the image name argument) that still carries the prepared-metadata label, authoring the correct io.buildpacks.lifecycle.metadata from its actual layers and re-pushing config+manifest only. Idempotent. The standalone counterpart is 'pack image-metadata fix'.`)
 	cmd.Flags().StringVar(&buildFlags.Policy, "pull-policy", "", `Pull policy to use. Accepted values are always, never, and if-not-present. (default "always")`)
 	cmd.Flags().StringVar(&buildFlags.ExecutionEnv, "exec-env", "production", `Execution environment to use. (default "production"`)
 	cmd.Flags().StringVarP(&buildFlags.Registry, "buildpack-registry", "r", cfg.DefaultRegistryName, "Buildpack Registry by name")
