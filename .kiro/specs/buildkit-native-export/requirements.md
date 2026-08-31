@@ -399,6 +399,49 @@ Intentionally N/A on this publish-only, registry-export backend (NOT gaps):
 used by `-daemon` export), non-publish output modes, and `--layout` (OCI on-disk
 export was removed on this branch).
 
+### Requirement 13: Volumes rejected; CNB service bindings supported via `--binding`
+
+**User Story:** As a developer, I want to inject read-only config/secrets (CNB
+service bindings) into a buildkit build, and I want the backend to be honest that
+arbitrary host `--volume` mounts are not possible under BuildKit rather than
+silently ignoring them.
+
+Context: `--volume` mounts a LIVE host path into the lifecycle container (read-only
+or read-write). BuildKit builds in a sandbox with no `docker run -v` equivalent, so
+read-write host mounts are structurally impossible and read-only host data would be a
+point-in-time sync rather than a live bind (see the volumes/bindings spike). CNB
+service bindings, by contrast, are read-only, small, and target a well-known path
+(`/platform/bindings/<name>`), so they map cleanly onto a BuildKit read-only mount.
+Bindings are not first-class in pack today (they are delivered as data over
+`--volume`); this backend adds a dedicated `--binding` input.
+
+#### Acceptance Criteria
+
+1. `--volume` SHALL be REJECTED on the buildkit backend, expressed as
+   `BackendCapabilities.SupportsHostVolumes` (true for docker-daemon, false for
+   buildkit), with a message directing read-only config/secret users to `--binding`.
+   (IMPLEMENTED — verified via CLI validation test.)
+2. `pack --binding "[<name>=]<host path>"` (repeatable) SHALL provide a CNB service
+   binding. The host path MUST be an existing directory (CNB convention: a `type`
+   file plus optional `provider` + secret files). The binding name defaults to the
+   directory's base name and MUST NOT contain a path separator; duplicate names are
+   rejected. (IMPLEMENTED — `parseBindings`, unit-tested.)
+3. On the BUILDKIT backend each binding SHALL be synced in as an `llb.Local` and
+   MOUNTED READ-ONLY at `/platform/bindings/<name>` on the detector and builder RUNs
+   — mounted, NOT copied — so binding data (including secrets) is available to
+   buildpacks during the build but never captured in a layer or the assembled image.
+   (IMPLEMENTED — verified: the ca-certificates buildpack reads a binding at
+   `/platform/bindings/<name>/ca.crt` and the successful build's image does not carry
+   the binding files.)
+4. On the DOCKER-DAEMON backend `--binding` SHALL be translated to the equivalent
+   read-only volume mount (`<host path>:/platform/bindings/<name>:ro`), so the flag
+   behaves consistently across backends. Both backends set
+   `BackendCapabilities.SupportsBindings = true`. (IMPLEMENTED.)
+5. FUTURE HARDENING (not required for MVP): deliver each binding's secret files via
+   BuildKit secret mounts (`llb.AddSecret`, one mount per file) instead of an
+   `llb.Local` sync, so the bytes never enter the LLB graph. The backend already
+   advertises `SupportsSecretMounts`. Tracked in the volumes/bindings spike.
+
 ### Requirement 10: Self-healing (DEFERRED — after MVP)
 
 **User Story:** As a CI/CD operator, I want a way to detect and fix an image whose

@@ -239,6 +239,20 @@ type PlatformBuildOpts struct {
 	// copy-out.
 	SBOMDestinationDir   string
 	ReportDestinationDir string
+	// Bindings are CNB service bindings (pack --binding) to mount read-only at
+	// /platform/bindings/<name> in the lifecycle RUNs. Each host dir is synced in as
+	// an llb.Local and mounted (not copied) so binding secrets never land in a layer.
+	Bindings []BindingMount
+}
+
+// BindingMount is a CNB service binding: a host directory exposed read-only under
+// /platform/bindings/<Name> during the build.
+type BindingMount struct {
+	// Name is the binding name buildpacks see at /platform/bindings/<Name>.
+	Name string
+	// HostPath is the absolute host directory to sync in (contains type/provider/
+	// secret files).
+	HostPath string
 }
 
 // PlatformBuildResult describes the outcome of building for a single platform.
@@ -286,6 +300,21 @@ type BackendCapabilities struct {
 	// lifecycle-cache flags on backends that don't use them (rather than silently
 	// ignoring them), keeping backend-specific flag support grouped with the backend.
 	UsesLifecycleCache bool
+	// SupportsHostVolumes indicates the backend can mount arbitrary host paths into
+	// the build (pack --volume). The docker-daemon backend sets this true (real Docker
+	// bind mounts on the lifecycle phase containers). The buildkit backend sets it
+	// false: it builds in a sandbox with no docker-run-style bind mount — read-write
+	// host mounts are structurally impossible and read-only host data would be a
+	// point-in-time llb.Local sync rather than a live bind. The CLI rejects --volume on
+	// backends where this is false (read-only config/secret delivery is handled by the
+	// dedicated --binding mechanism instead; see SupportsBindings).
+	SupportsHostVolumes bool
+	// SupportsBindings indicates the backend can deliver CNB service bindings
+	// (read-only <name>/{type,provider,secret-files} trees at /platform/bindings) via
+	// pack --binding. Both backends support it: the buildkit backend mounts each
+	// binding read-only into the lifecycle RUNs; the docker-daemon backend translates
+	// --binding into the equivalent read-only volume mount.
+	SupportsBindings bool
 	// SupportsPreviousImage indicates the backend honors --previous-image (the
 	// analyzer reads a prior image's layer metadata + SBOM so the exporter can reuse
 	// unchanged layers by reference). The docker-daemon backend sets this true. The
@@ -314,6 +343,8 @@ func (t BackendType) Capabilities() BackendCapabilities {
 			PushesNatively:        true,
 			UsesLifecycleCache:    false, // uses BuildKit's own cache (--buildkit-cache-*)
 			SupportsPreviousImage: false, // content-addressed cache covers layer reuse
+			SupportsHostVolumes:   false, // sandboxed; no docker-run-style bind mount
+			SupportsBindings:      true,  // --binding mounted read-only into the RUNs
 		}
 	case BackendDockerDaemon, BackendAuto, "":
 		return BackendCapabilities{
@@ -321,6 +352,8 @@ func (t BackendType) Capabilities() BackendCapabilities {
 			PushesNatively:        false,
 			UsesLifecycleCache:    true, // --cache / --cache-image / --clear-cache
 			SupportsPreviousImage: true, // --previous-image (analyzer reads prior image)
+			SupportsHostVolumes:   true, // real Docker bind mounts on phase containers
+			SupportsBindings:      true, // --binding translated to a read-only volume
 		}
 	default:
 		// Unknown backend: be permissive on count (the factory will reject it).

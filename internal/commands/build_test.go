@@ -495,6 +495,13 @@ func testBuildCommand(t *testing.T, when spec.G, it spec.S) {
 				err := command.Execute()
 				h.AssertError(t, err, "--previous-image is not supported by the buildkit backend")
 			})
+
+			it("rejects --volume with a pointer to --binding", func() {
+				command.SetArgs([]string{"--builder", "my-builder", "image", "--build-backend", "buildkit", "--publish", "--volume", "/host:/target:ro"})
+				err := command.Execute()
+				h.AssertError(t, err, "--volume is not supported by the buildkit backend")
+				h.AssertError(t, err, "--binding")
+			})
 		})
 
 		when("a valid lifecycle-image is provided", func() {

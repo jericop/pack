@@ -12,6 +12,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"path"
 	"path/filepath"
 	"runtime"
 	"sort"
@@ -251,6 +252,13 @@ type BuildOptions struct {
 
 	// Directory to output the report.toml metadata artifact
 	ReportDestinationDir string
+
+	// Bindings are CNB service bindings to mount read-only at /platform/bindings/<name>.
+	// Each entry is "[<name>=]<host path>"; the host path is a directory containing a
+	// 'type' file (and optional 'provider' + secret files). Supported by all backends
+	// (the buildkit backend mounts them read-only into the lifecycle RUNs; the
+	// docker-daemon backend translates them to read-only volume mounts).
+	Bindings []string
 
 	// Desired create time in the output image config
 	CreationTime *time.Time
@@ -630,6 +638,22 @@ func (c *Client) Build(ctx context.Context, opts BuildOptions) error {
 		opts.ContainerConfig.Volumes = appendLayoutVolumes(opts.ContainerConfig.Volumes, pathsConfig)
 	}
 
+	// CNB service bindings (--binding). Parse + validate once. On the docker-daemon
+	// path they are delivered as read-only volume mounts at /platform/bindings/<name>
+	// (the same way bindings have always been delivered to the lifecycle container);
+	// on the buildkit path buildMultiPlatform mounts them read-only into the RUNs.
+	parsedBindings, err := parseBindings(opts.Bindings)
+	if err != nil {
+		return err
+	}
+	backendForBindings := multiplatform.BackendType(opts.BuildBackend).Resolve()
+	if backendForBindings != multiplatform.BackendBuildkit {
+		for _, b := range parsedBindings {
+			opts.ContainerConfig.Volumes = append(opts.ContainerConfig.Volumes,
+				fmt.Sprintf("%s:%s:ro", b.HostPath, path.Join(bindingsContainerDir, b.Name)))
+		}
+	}
+
 	processedVolumes, warnings, err := processVolumes(targetToUse.OS, opts.ContainerConfig.Volumes)
 	if err != nil {
 		return err
@@ -946,6 +970,18 @@ func (c *Client) buildMultiPlatform(ctx context.Context, opts BuildOptions, life
 	// host env), so buildpacks can fetch dependencies behind a proxy.
 	proxyConfig := c.processProxyConfig(opts.ProxyConfig)
 
+	// CNB service bindings (--binding): parsed + validated, then mounted read-only at
+	// /platform/bindings/<name> by the backend. Already validated in Build(); re-parse
+	// here to the backend's mount type.
+	parsedBindings, err := parseBindings(opts.Bindings)
+	if err != nil {
+		return err
+	}
+	bindings := make([]multiplatform.BindingMount, len(parsedBindings))
+	for i, b := range parsedBindings {
+		bindings[i] = multiplatform.BindingMount{Name: b.Name, HostPath: b.HostPath}
+	}
+
 	// Build the platform options (shared across all architectures)
 	platformBuildOpts := multiplatform.PlatformBuildOpts{
 		BuilderImage:     lifecycleOpts.BuilderImage,
@@ -984,6 +1020,7 @@ func (c *Client) buildMultiPlatform(ctx context.Context, opts BuildOptions, life
 		AdditionalTags:       opts.AdditionalTags,
 		SBOMDestinationDir:   opts.SBOMDestinationDir,
 		ReportDestinationDir: opts.ReportDestinationDir,
+		Bindings:             bindings,
 	}
 
 	// If the user explicitly passed --lifecycle-image, use it regardless of trust mode
@@ -1317,6 +1354,60 @@ func usesContainerdStorage(docker DockerClient) bool {
 	}
 
 	return false
+}
+
+// bindingsContainerDir is the CNB platform bindings directory buildpacks read
+// (under the platform dir, /platform/bindings by convention).
+const bindingsContainerDir = "/platform/bindings"
+
+// bindingMount is a parsed --binding entry: a host directory and the binding name
+// it is exposed under at /platform/bindings/<name>.
+type bindingMount struct {
+	Name     string
+	HostPath string
+}
+
+// parseBindings parses --binding values of the form "[<name>=]<host path>". The
+// host path must be an existing directory; the CNB convention is that it contains a
+// 'type' file (and optional 'provider' + secret files). When no name is given, the
+// directory's base name is used. Names must be simple path segments (no '/').
+func parseBindings(raw []string) ([]bindingMount, error) {
+	var out []bindingMount
+	seen := map[string]bool{}
+	for _, entry := range raw {
+		name := ""
+		hostPath := entry
+		if i := strings.Index(entry, "="); i >= 0 {
+			name = strings.TrimSpace(entry[:i])
+			hostPath = strings.TrimSpace(entry[i+1:])
+		}
+		if hostPath == "" {
+			return nil, fmt.Errorf("invalid --binding %q: missing host path", entry)
+		}
+		abs, err := filepath.Abs(hostPath)
+		if err != nil {
+			return nil, fmt.Errorf("invalid --binding %q: %w", entry, err)
+		}
+		info, err := os.Stat(abs)
+		if err != nil {
+			return nil, fmt.Errorf("invalid --binding %q: %w", entry, err)
+		}
+		if !info.IsDir() {
+			return nil, fmt.Errorf("invalid --binding %q: host path %q is not a directory", entry, abs)
+		}
+		if name == "" {
+			name = filepath.Base(abs)
+		}
+		if strings.ContainsAny(name, `/\`) {
+			return nil, fmt.Errorf("invalid --binding %q: binding name %q must not contain a path separator", entry, name)
+		}
+		if seen[name] {
+			return nil, fmt.Errorf("invalid --binding %q: duplicate binding name %q", entry, name)
+		}
+		seen[name] = true
+		out = append(out, bindingMount{Name: name, HostPath: abs})
+	}
+	return out, nil
 }
 
 // builderImageLabel reads a single label off the builder image, returning "" on

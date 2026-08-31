@@ -149,6 +149,7 @@ func (b *BuildkitBackend) driveNative(ctx context.Context, bkClient *client.Clie
 		additionalTags:      opts.AdditionalTags,
 		sbomDestDir:         opts.SBOMDestinationDir,
 		reportDestDir:       opts.ReportDestinationDir,
+		bindings:            opts.Bindings,
 	}
 	if reg := registryHost(opts.ImageName); reg != "" && isLikelyInsecureRegistry(reg) {
 		in.insecureRegistries = []string{reg}
@@ -157,10 +158,21 @@ func (b *BuildkitBackend) driveNative(ctx context.Context, bkClient *client.Clie
 		in.lifecycleImage = opts.LifecycleImage
 	}
 
+	// Local mounts: the app source context, plus one local per CNB service binding
+	// (mounted read-only at /platform/bindings/<name> inside the lifecycle RUNs).
+	localMounts := map[string]fsutil.FS{
+		contextLocalName: appFS,
+	}
+	for _, b := range opts.Bindings {
+		bindFS, ferr := fsutil.NewFS(b.HostPath)
+		if ferr != nil {
+			return nil, fmt.Errorf("creating local FS for binding %q (%s): %w", b.Name, b.HostPath, ferr)
+		}
+		localMounts[bindingLocalName(b.Name)] = bindFS
+	}
+
 	solveOpt := client.SolveOpt{
-		LocalMounts: map[string]fsutil.FS{
-			contextLocalName: appFS,
-		},
+		LocalMounts: localMounts,
 		Session: []session.Attachable{authProvider},
 		// FrontendAttrs MUST be non-nil: BuildKit's client.solve does
 		// `maps.Copy(maps.Clone(opt.FrontendAttrs), cacheOpt.frontendAttrs)`, and

@@ -313,3 +313,26 @@ implement as its own read-only mechanism when prioritized.
 - `go.mod:24` — `github.com/moby/buildkit v0.32.2`.
 - `moby/buildkit@v0.32.2/client/llb/exec.go:704,710,767,779` — `AddMount`, `AddSSHSocket`, `AddSecret`, `AddSecretWithDest`.
 - lifecycle repo: grep `binding` across `*.go` → no matches (no first-class bindings).
+
+## UPDATE — decision taken + implemented
+
+Both recommendations were accepted and implemented (see spec Requirement 13):
+
+- **`--volume`: REJECTED on the buildkit backend** via
+  `BackendCapabilities.SupportsHostVolumes = false`, with an error pointing users at
+  `--binding` for read-only config/secrets.
+- **CNB bindings: IMPLEMENTED now** (not deferred) via a new repeatable `--binding`
+  flag (`[<name>=]<host path>`), using the **local-sync-tree** candidate: each
+  binding host dir is synced in as an `llb.Local` and MOUNTED READ-ONLY at
+  `/platform/bindings/<name>` on the detector + builder RUNs (mounted, not copied, so
+  secrets do not land in a layer). On the docker-daemon backend `--binding` is
+  translated to the equivalent `:ro` volume mount. Both backends advertise
+  `SupportsBindings = true`.
+
+The **secret-mount hardening** (option 2 — `llb.AddSecret`, one mount per binding
+file so the bytes never enter the LLB graph) remains a future enhancement. Note on
+the "one binding = one secret" question raised during review: BuildKit secret mounts
+are per-FILE, not per-directory, so a binding with N files would be N secret mounts
+reconstructed under `/platform/bindings/<name>/`. That granularity mismatch is why
+the local-sync-tree was chosen for the initial implementation; the secret-mount
+variant is a hardening follow-up, not a blocker.

@@ -91,7 +91,16 @@ type nativeBuildInputs struct {
 	// output is namespaced per platform (<dest>/<os>-<arch>/...).
 	sbomDestDir   string
 	reportDestDir string
+	// bindings are CNB service bindings (pack --binding). Each is synced in as an
+	// llb.Local (keyed bindingLocalPrefix+Name) and MOUNTED read-only at
+	// /platform/bindings/<Name> on the detector + builder RUNs — mounted, not copied,
+	// so binding secrets never land in a layer.
+	bindings []BindingMount
 }
+
+// bindingLocalName returns the llb.Local key (and SolveOpt.LocalMounts key) for a
+// binding, namespaced so it can't collide with the app context local.
+func bindingLocalName(name string) string { return "cnb-binding-" + name }
 
 // contextLocalName is the llb.Local key under which pack provides the app source.
 const contextLocalName = "context"
@@ -544,18 +553,35 @@ func buildEmitLLB(in nativeBuildInputs, p ocispecs.Platform) llb.State {
 	skipChown := []string{"-skip-chown", "-uid", fmt.Sprintf("%d", in.uid), "-gid", fmt.Sprintf("%d", in.gid)}
 	insecure := insecureRegistryArgsNBF(in.insecureRegistries)
 
+	// CNB service bindings: mount each host dir READ-ONLY at /platform/bindings/<name>
+	// on the phases that read them (detector + builder). Mounted, not copied, so the
+	// binding data (incl. secrets) is present during the RUN but never captured in a
+	// layer or the assembled image.
+	var bindingMounts []llb.RunOption
+	for _, b := range in.bindings {
+		bindingMounts = append(bindingMounts, llb.AddMount(
+			path.Join("/platform/bindings", b.Name),
+			llb.Local(bindingLocalName(b.Name)),
+			llb.Readonly,
+		))
+	}
+
 	analyzerArgs := append([]string{"/cnb/lifecycle/analyzer"}, skipChown...)
 	analyzerArgs = append(analyzerArgs, insecure...)
 	analyzerArgs = append(analyzerArgs, "-run-image", in.runImage, "-layers", "/layers", in.imageName)
 	base = base.Run(append([]llb.RunOption{llb.Args(analyzerArgs), llb.WithCustomNamef("[%s] lifecycle: analyzer", plat), cacheMount}, env...)...).Root()
 
-	base = base.Run(append([]llb.RunOption{llb.Args([]string{"/cnb/lifecycle/detector", "-app", "/workspace", "-layers", "/layers"}), llb.WithCustomNamef("[%s] lifecycle: detector", plat)}, env...)...).Root()
+	detectorOpts := append([]llb.RunOption{llb.Args([]string{"/cnb/lifecycle/detector", "-app", "/workspace", "-layers", "/layers"}), llb.WithCustomNamef("[%s] lifecycle: detector", plat)}, env...)
+	detectorOpts = append(detectorOpts, bindingMounts...)
+	base = base.Run(detectorOpts...).Root()
 
 	restorerArgs := append([]string{"/cnb/lifecycle/restorer"}, skipChown...)
 	restorerArgs = append(restorerArgs, "-layers", "/layers")
 	base = base.Run(append([]llb.RunOption{llb.Args(restorerArgs), llb.WithCustomNamef("[%s] lifecycle: restorer", plat), cacheMount}, env...)...).Root()
 
-	base = base.Run(append([]llb.RunOption{llb.Args([]string{"/cnb/lifecycle/builder", "-app", "/workspace", "-layers", "/layers"}), llb.WithCustomNamef("[%s] lifecycle: builder", plat)}, env...)...).Root()
+	builderOpts := append([]llb.RunOption{llb.Args([]string{"/cnb/lifecycle/builder", "-app", "/workspace", "-layers", "/layers"}), llb.WithCustomNamef("[%s] lifecycle: builder", plat)}, env...)
+	builderOpts = append(builderOpts, bindingMounts...)
+	base = base.Run(builderOpts...).Root()
 
 	exporterArgs := append([]string{"/cnb/lifecycle/exporter"}, skipChown...)
 	exporterArgs = append(exporterArgs, insecure...)

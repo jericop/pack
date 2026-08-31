@@ -59,6 +59,7 @@ type BuildFlags struct {
 	Buildpacks                []string
 	Extensions                []string
 	Volumes                   []string
+	Bindings                  []string
 	AdditionalTags            []string
 	Workspace                 string
 	GID                       int
@@ -220,6 +221,7 @@ func Build(logger logging.Logger, cfg config.Config, packClient PackClient) *cob
 					Network: flags.Network,
 					Volumes: flags.Volumes,
 				},
+				Bindings:                 flags.Bindings,
 				DefaultProcessType:       flags.DefaultProcessType,
 				ProjectDescriptorBaseDir: filepath.Dir(actualDescriptorPath),
 				ProjectDescriptor:        descriptor,
@@ -321,6 +323,7 @@ This option may set DOCKER_HOST environment variable for the build container if 
 	cmd.Flags().BoolVar(&buildFlags.TrustBuilder, "trust-builder", false, "Trust the provided builder.\nAll lifecycle phases will be run in a single container.\nFor more on trusted builders, and when to trust or untrust a builder, check out our docs here: https://buildpacks.io/docs/tools/pack/concepts/trusted_builders")
 	cmd.Flags().BoolVar(&buildFlags.TrustExtraBuildpacks, "trust-extra-buildpacks", false, "Trust buildpacks that are provided in addition to the buildpacks on the builder")
 	cmd.Flags().StringArrayVar(&buildFlags.Volumes, "volume", nil, "Mount host volume into the build container, in the form '<host path>:<target path>[:<options>]'.\n- 'host path': Name of the volume or absolute directory path to mount.\n- 'target path': The path where the file or directory is available in the container.\n- 'options' (default \"ro\"): An optional comma separated list of mount options.\n    - \"ro\", volume contents are read-only.\n    - \"rw\", volume contents are readable and writeable.\n    - \"volume-opt=<key>=<value>\", can be specified more than once, takes a key-value pair consisting of the option name and its value."+stringArrayHelp("volume"))
+	cmd.Flags().StringArrayVar(&buildFlags.Bindings, "binding", nil, "Provide a CNB service binding, mounted read-only at /platform/bindings/<name>, in the form '[<name>=]<host path>'.\n- 'host path': Absolute path to a binding directory containing a 'type' file (and optional 'provider' + secret files).\n- 'name' (default: the directory's base name): The binding name buildpacks see under /platform/bindings.\nUnlike --volume, bindings are always read-only and are supported by every build backend."+stringArrayHelp("binding"))
 	cmd.Flags().StringVar(&buildFlags.Workspace, "workspace", "", "Location at which to mount the app dir in the build image")
 	cmd.Flags().IntVar(&buildFlags.GID, "gid", 0, `Override GID of user's group in the stack's build and run images. The provided value must be a positive number`)
 	cmd.Flags().IntVar(&buildFlags.UID, "uid", 0, `Override UID of user in the stack's build and run images. The provided value must be a positive number`)
@@ -441,6 +444,18 @@ func validateBuildFlags(flags *BuildFlags, cfg config.Config, inputImageRef clie
 	if !caps.SupportsPreviousImage && flags.PreviousImage != "" {
 		return errors.Errorf(
 			"--previous-image is not supported by the %s backend; it applies to the docker-daemon backend. The buildkit backend reuses unchanged layers via BuildKit's content-addressed cache.",
+			backend,
+		)
+	}
+
+	// --volume mounts a live host path into the lifecycle container. The buildkit
+	// backend builds in a sandbox with no docker-run-style bind mount, so read-write
+	// host mounts are impossible and read-only host data would be a point-in-time sync
+	// rather than a live bind. Reject it rather than silently changing semantics; for
+	// read-only CNB service bindings use --binding instead.
+	if !caps.SupportsHostVolumes && len(flags.Volumes) > 0 {
+		return errors.Errorf(
+			"--volume is not supported by the %s backend; it mounts a live host path into the build, which BuildKit's sandboxed model cannot provide. For read-only CNB service bindings, use --binding.",
 			backend,
 		)
 	}
