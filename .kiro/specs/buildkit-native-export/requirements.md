@@ -1,4 +1,6 @@
-# Requirements: BuildKit-Native Export (Option A — build-then-finalize)
+# Requirements Document
+
+**BuildKit-Native Export (Option A — build-then-finalize)**
 
 ## Introduction
 
@@ -389,7 +391,9 @@ dropped.
    (cdx/spdx/syft), identical in shape to a daemon build.)
 6. `--volume` (user bind mounts) SHALL be honored or documented as unsupported.
    BuildKit's isolated build model has no direct daemon bind-mount equivalent; this
-   is a design decision. (NOT YET IMPLEMENTED.)
+   is a design decision. (IMPLEMENTED — REJECTED as an unsupported capability; see
+   Requirement 13, `BackendCapabilities.SupportsHostVolumes = false`, with a message
+   directing read-only config/secret users to `--binding`.)
 7. Order-defined EXTENSIONS (Dockerfiles / extender / kaniko) are NOT supported by
    this backend and SHALL be documented as such (the buildkit path runs a fixed
    analyzer/detector/builder/exporter with no extender). (DOCUMENTED — out of scope.)
@@ -441,6 +445,115 @@ Bindings are not first-class in pack today (they are delivered as data over
    BuildKit secret mounts (`llb.AddSecret`, one mount per file) instead of an
    `llb.Local` sync, so the bytes never enter the LLB graph. The backend already
    advertises `SupportsSecretMounts`. Tracked in the volumes/bindings spike.
+
+### Requirement 14: Workspace, uid/gid override, and exec-env supported
+
+**User Story:** As a developer, I want `--workspace`, `--uid`, `--gid`, and
+`--exec-env` to behave the same on the `buildkit` backend as on the default
+`docker-daemon` backend, so I can control where my app is staged, which user the
+lifecycle runs as, and which CNB execution environment buildpacks see.
+
+Context: like the other parity flags (Requirement 12), the buildkit backend
+hardcodes the lifecycle phase args in `native_buildfunc.go`, so these four daemon
+flags had to be re-plumbed explicitly through `PlatformBuildOpts` →
+`nativeBuildInputs` → the LLB assembly. A parity review found that all four map
+cleanly onto the buildkit path (no fundamental tension), so they are SUPPORTED
+(honored), not rejected.
+
+#### Acceptance Criteria
+
+1. `--workspace` SHALL set the app-directory mount path inside the build, matching
+   the daemon backend's `-app`/workspace. The app source SHALL be copied to
+   `<workspace>` and every lifecycle phase that takes `-app` (detector, builder,
+   exporter), plus the workspace `chmod`, SHALL use `<workspace>`; WHEN unset it
+   SHALL default to `/workspace`. App-source assembly is decoupled from the literal
+   path because it copies by the emitted `Source.Dir`. (IMPLEMENTED — verified: a
+   custom `--workspace /ws-unique-9` build succeeded end-to-end.)
+2. `--uid` / `--gid` SHALL override the user/group the lifecycle runs as, and the
+   OVERRIDE SHALL WIN over the builder image's own `CNB_USER_ID`/`CNB_GROUP_ID`,
+   mirroring the daemon backend's `-uid`/`-gid` override semantics. The CLI defaults
+   `UserID`/`GroupID` to `-1` when the flags are not passed; a value `>= 0` overrides
+   the builder's `BuilderUID`/`BuilderGID`, otherwise the builder's own ids are used.
+   (IMPLEMENTED — verified: `--uid 2000` reached the lifecycle, proven by the
+   expected in-builder permission error for an unprovisioned uid.)
+3. `--exec-env` SHALL be passed to detect/build as the `CNB_EXEC_ENV` environment
+   variable so buildpacks can behave per-environment and detection can filter by a
+   buildpack's declared exec-env list. It SHALL be gated on Platform API `>= 0.15`,
+   matching the daemon backend's `If(AtLeast("0.15"))` gate, because older lifecycles
+   reject the variable; on a builder whose platform API is `< 0.15` the value SHALL
+   be omitted rather than set. (IMPLEMENTED — verified against the
+   buildkit-native-export builder, whose supported platform APIs include 0.15.)
+4. These flags SHALL be expressed as first-class `PlatformBuildOpts` inputs
+   (`Workspace`, `OverrideUID`, `OverrideGID`, `ExecutionEnv`) resolved in the
+   backend and threaded into `nativeBuildInputs`, NOT hardcoded — so a future phase
+   arg change updates them in one place. (IMPLEMENTED.)
+
+### Requirement 15: Buildpack-selection, creation-time, and descriptor-filter parity
+
+**User Story:** As a developer, I want the flags that decide WHICH buildpacks run
+(`--buildpack`, `--pre-buildpack`, `--post-buildpack`, `--buildpack-registry`), the
+image `--creation-time`, and the `--descriptor` file include/exclude to behave the
+same on the `buildkit` backend as on the default `docker-daemon` backend — reusing
+pack's existing resolution logic, never re-deciding it in the backend.
+
+Context: pack's shared `Client.Build` resolves buildpacks/order/env BEFORE the
+backend split (`processBuildpacks` → the resolved `order` + the `fetchedBPs`
+modules; `getFileFilter`; `parseTime`). The daemon path then bakes the resolved
+modules into a local EPHEMERAL builder image. The buildkit backend pulls the
+ORIGINAL remote builder as a content-addressed `llb.Image` and never sees that
+ephemeral image, so before this change: the injected order.toml could reference
+buildpack modules that were absent from the builder (the dead
+`PlatformBuildOpts.BuildpackImages` field carried nothing into the build), and
+`--creation-time` / the descriptor file filter were dropped on the buildkit path.
+The buildkit-native fix injects the resolved modules into the builder over LLB
+(no ephemeral image) and reuses pack's order + filter + time verbatim.
+
+#### Acceptance Criteria
+
+1. `--buildpack`, `--pre-buildpack`, and `--post-buildpack` (and buildpacks declared
+   in the project descriptor, and `urn:cnb:registry:` refs resolved via
+   `--buildpack-registry`) SHALL participate in a buildkit build. Pack SHALL stage
+   the exact modules it already fetched (`fetchedBPs` from `processBuildpacks`,
+   which covers image, local dir/tarball, and registry refs) into a tree laid out as
+   `/cnb/buildpacks/{id}/{version}/*`, and the backend SHALL sync it in as an
+   `llb.Local` and COPY its CONTENTS over the builder's `/cnb/buildpacks` BEFORE the
+   detector runs. (IMPLEMENTED — verified: a `--buildpack` local module was found by
+   the detector, participated in the group, ran during build, and contributed a
+   launch layer.)
+2. A staged buildpack whose `id@version` matches one already in the builder SHALL
+   OVERRIDE the builder's copy (the "test a local change to a builder buildpack"
+   workflow), because the copy merges over the same `/cnb/buildpacks/{id}/{version}`
+   path. (IMPLEMENTED.)
+3. The buildkit detection ORDER SHALL be the SAME order `processBuildpacks` computed
+   (builder → descriptor → `--buildpack`, with `--pre`/`--post` prepended/appended,
+   and `--buildpack` overriding descriptor buildpacks when both are set), serialized
+   with pack's canonical `builder.OrderTOML`. The backend SHALL NOT re-derive or
+   re-decide precedence, and SHALL NOT round-trip through the builder's order LABEL.
+   (IMPLEMENTED — the bespoke label→JSON→TOML conversion was removed in favor of the
+   shared serializer fed the resolved order.)
+4. The injected modules SHALL exist ONLY in the transient builder state; because the
+   final image is assembled FROM the run image, they SHALL NOT leak into the output
+   image. Injecting them SHALL change the LLB graph in a cache-friendly way (unchanged
+   inputs cache-hit on rebuild). (IMPLEMENTED — verified: rebuild was fully cached.)
+5. `--creation-time` SHALL set the produced image config's `created` timestamp from
+   `SOURCE_DATE_EPOCH`, gated on Platform API `>= 0.9` (matching the daemon's
+   `If(AtLeast("0.9"))`). Because the buildkit exporter runs in emit-mode (a
+   `RecordingImage` that never pushes, so the exporter's own `WithCreatedAt` is
+   bypassed) and finalize only rewrites labels, the backend SHALL set `Created` when
+   authoring the assembled image config. (IMPLEMENTED.)
+6. `--descriptor` project.toml `[build]` `include`/`exclude` SHALL filter the app
+   source synced into the buildkit build context, matching the daemon backend's
+   file-filtered app copy. The backend SHALL apply pack's resolved `FileFilter`
+   (previously dropped/`nil` on the buildkit path). (IMPLEMENTED.)
+7. `--trust-extra-buildpacks` is N/A on the buildkit backend and SHALL be documented
+   as such: on the daemon it only selects the single-container creator vs the 5-phase
+   flow, and the buildkit backend always runs its own fixed 5-phase emit flow (no
+   creator), so the flag has no effect to honor or reject. (DOCUMENTED.)
+8. `--extension` (order-defined image extensions) remains UNSUPPORTED on the buildkit
+   backend and SHALL be documented as such: extensions require the extender/kaniko
+   phase, which this backend does not run (it executes a fixed
+   analyzer→detector→builder→exporter). This is a tracked follow-up, consistent with
+   Requirement 12's extensions note. (DOCUMENTED — out of scope.)
 
 ### Requirement 10: Self-healing (DEFERRED — after MVP)
 

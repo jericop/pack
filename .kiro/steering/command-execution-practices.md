@@ -60,8 +60,47 @@ Two acceptable patterns:
    ```
 
 The ONLY commands that may be typed inline are bare, unchanging, side-effect-light
-single commands already approved this session (e.g. `git status`,
-`docker buildx ls`). When in doubt, use a script.
+SINGLE commands already approved this session (e.g. `git status`,
+`docker buildx ls`, a single `ls`/`find` locate with no `&&`). When in doubt, use a
+script.
+
+### 0a. Multi-statement chains and one-off setup ALWAYS go in a command file (HARD RULE)
+
+The moment a command line contains ANY of `&&`, `||`, `;`, a pipe `|`, `$(...)`, or
+would run more than ONE program, it MUST be written to `/tmp/cmds/NNN-desc.sh` and
+run via `bash /tmp/run.sh /tmp/cmds/NNN-desc.sh`. This includes seemingly-trivial
+setup/inspection chains. Concrete examples that MUST NOT be typed inline (each is a
+NEW command string and will prompt for approval):
+
+```bash
+# WRONG — chained setup/inspection, typed inline (prompts every time):
+chmod +x /tmp/x/bin/* && ls -la /tmp/x/bin && docker buildx ls | grep foo && curl -s localhost:5050/v2/
+
+# WRONG — even a two-step "just checking" chain:
+ls -la /some/path && cat /some/path/file
+```
+
+Do this instead — put it in a command file and run the stable invocation:
+
+```bash
+# /tmp/cmds/317-prep-and-check.sh
+#!/bin/bash
+chmod +x /tmp/x/bin/detect /tmp/x/bin/build
+ls -la /tmp/x/bin
+docker buildx ls | grep -i pack-multiplatform
+curl -s -o /dev/null -w "registry: %{http_code}\n" http://localhost:5050/v2/
+```
+
+```bash
+bash /tmp/run.sh /tmp/cmds/317-prep-and-check.sh   # stable, pre-approved
+```
+
+RULE OF THUMB: if you are about to type a command containing `&&` (or any of the
+metacharacters above), STOP and write a numbered command file instead. `chmod`,
+`curl`, `docker ... | grep`, and "read a couple of files to sanity-check" are NOT
+exceptions — they go in a command file. Creating files with the write tool is fine
+and preferred over `echo >`/heredocs; but ANY shell execution beyond one bare
+approved command uses `/tmp/run.sh`.
 
 ## 1. NEVER put env vars inline; ALWAYS `export` them inside a script (MANDATORY)
 

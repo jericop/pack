@@ -159,6 +159,78 @@ BuildFunc must reproduce the environment standard pack provides. Threaded as
   `WithLifecycleProxy`.
 - **Not set** (N/A for publish-only): `CNB_USE_LAYOUT` / `CNB_LAYOUT_DIR`.
 
+### Workspace, uid/gid override, exec-env — Requirement 14
+
+The same hardcoded-phase-args constraint that drives Requirement 11 applies to four
+more daemon flags, threaded the same way (`PlatformBuildOpts` → `nativeBuildInputs`
+→ `buildEmitLLB`):
+
+- **`--workspace`** → `PlatformBuildOpts.Workspace` → `nativeBuildInputs.workspace`
+  (default `/workspace`). Replaces the previously hardcoded `/workspace` in five
+  places: the app-source `llb.Copy` target, the `chmod -R 777 <workspace>` RUN, and
+  the `-app <workspace>` arg on the detector, builder, and exporter RUNs. App-source
+  ASSEMBLY (`FROM run-image`) is unaffected because it copies by the emitted
+  `Source.Dir`, not the literal workspace path.
+- **`--uid` / `--gid`** → `PlatformBuildOpts.OverrideUID` / `OverrideGID` (CLI
+  default `-1` = unset). In `backend_native.go` the effective uid/gid is
+  `override if >= 0 else opts.BuilderUID/BuilderGID`, so a user override WINS over
+  the builder's own ids — mirroring the daemon `-uid`/`-gid` override semantics. The
+  effective values feed `nativeBuildInputs.uid/gid` (and thus `CNB_USER_ID` /
+  `CNB_GROUP_ID` in the phase env and the emit chown targets).
+- **`--exec-env`** → `PlatformBuildOpts.ExecutionEnv` → `nativeBuildInputs.execEnv`,
+  emitted as `CNB_EXEC_ENV` via `llb.AddEnv` ONLY when non-empty AND the platform API
+  is `>= 0.15` (helper `platformAPIAtLeastNBF`, matching the daemon
+  `If(AtLeast("0.15"))` gate and the exec-env row in the Platform-API table below).
+  Older lifecycles reject the variable, so on `< 0.15` builders it is omitted.
+
+All four are resolved in the backend and carried as first-class inputs (not
+hardcoded) so a future phase-arg change updates them in one place.
+
+### Buildpack selection, creation-time, descriptor filter — Requirement 15
+
+These flags reuse pack's shared `Client.Build` resolution (which runs BEFORE the
+backend split) and only MATERIALIZE the decision on the buildkit path — the backend
+never re-decides precedence.
+
+- **Buildpack injection** (`--buildpack` / `--pre-buildpack` / `--post-buildpack`,
+  descriptor buildpacks, and `urn:cnb:registry:` refs via `--buildpack-registry`):
+  the daemon path bakes the resolved modules into a local EPHEMERAL builder image;
+  the buildkit backend never pulls that image (it uses the ORIGINAL remote builder
+  as an `llb.Image`). Instead, pack stages the modules it already fetched
+  (`processBuildpacks` → `fetchedBPs`) via `stageExtraBuildpacks` →
+  `extractModuleToDir`, which untars each `BuildModule.Open()` (whose entries are
+  rooted at `/cnb/buildpacks/{id}/{version}/*`) into one temp dir. The backend syncs
+  that dir as `llb.Local(extraBuildpacksLocalName)` and, in `buildEmitLLB` right after
+  the order.toml write, `llb.Copy`s its CONTENTS
+  (`CopyDirContentsOnly: true` — REQUIRED, since `/cnb/buildpacks` already exists and
+  BuildKit otherwise nests the source dir underneath) over the builder's
+  `/cnb/buildpacks` BEFORE the detector RUN. A same-`id@version` module overrides the
+  builder's copy. The modules live only in the transient builder state; the final
+  image is assembled FROM the run image, so they never leak into the output. No
+  ephemeral daemon image is built — the graph stays cache-friendly (verified: rebuild
+  fully cached). `PlatformBuildOpts.ExtraBuildpacksDir` replaces the dead
+  `BuildpackImages` field.
+- **Order source of truth**: the `orderToml` written into the builder is now produced
+  by `builder.OrderTOML(order, orderExtensions)` — the SAME canonical serializer the
+  builder uses — fed the SAME resolved `order` `processBuildpacks` returned. This
+  replaced a builder-order-LABEL → JSON → hand-rolled-TOML round-trip
+  (`convertOrderJSONToTOML`, now deleted), removing a duplicate of the precedence
+  serialization and guaranteeing the buildkit detection order equals the daemon's.
+- **`--creation-time`**: emit-mode runs a `RecordingImage` that never pushes, so the
+  exporter's `WithCreatedAt` (which the daemon relies on) never fires, and finalize
+  only rewrites labels. So the backend sets `img.Created` from `SOURCE_DATE_EPOCH`
+  when authoring the assembled image config in `nativeBuildPlatform`, gated
+  `platformAPIAtLeastNBF(in.platformAPI, "0.9")` to match the daemon's
+  `If(AtLeast("0.9"))`. finalize's `cfg.DeepCopy()` preserves it.
+- **`--descriptor` file filter**: `getFileFilter(descriptor)` (project.toml `[build]`
+  include/exclude) is now threaded to `PlatformBuildOpts.FileFilter` (was hardcoded
+  `nil`) and applied to the app context via `fsutil.NewFilterFS`, bridging pack's
+  `func(string) bool` keep-predicate to fsutil's per-path `MapFunc`, so excluded
+  files never sync into the build context.
+- **`--trust-extra-buildpacks`**: N/A — it only selects creator vs 5-phase on the
+  daemon; buildkit always runs its own 5-phase emit flow. **`--extension`**:
+  unsupported (needs the extender/kaniko phase this backend does not run).
+
 ### Build-metadata label (contract with the lifecycle)
 
 `io.buildpacks.buildkit.native.build-metadata` — a JSON image label carrying the
