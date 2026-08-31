@@ -464,6 +464,46 @@ func testBuildCommand(t *testing.T, when spec.G, it spec.S) {
 			})
 		})
 
+		when("--build-backend buildkit is used with lifecycle-cache flags", func() {
+			it.Before(func() {
+				// The buildkit backend is experimental; enable it in config.
+				cfg = config.Config{Experimental: true}
+				command = commands.Build(logger, cfg, mockClient)
+			})
+
+			it("rejects --clear-cache with a pointer to the buildkit cache flags", func() {
+				command.SetArgs([]string{"--builder", "my-builder", "image", "--build-backend", "buildkit", "--publish", "--clear-cache"})
+				err := command.Execute()
+				h.AssertError(t, err, "--clear-cache is not supported by the buildkit backend")
+				h.AssertError(t, err, "--buildkit-cache-from")
+			})
+
+			it("rejects --cache-image", func() {
+				command.SetArgs([]string{"--builder", "my-builder", "image", "--build-backend", "buildkit", "--publish", "--cache-image", "reg/x:cache"})
+				err := command.Execute()
+				h.AssertError(t, err, "--cache-image is not supported by the buildkit backend")
+			})
+
+			it("rejects --cache", func() {
+				command.SetArgs([]string{"--builder", "my-builder", "image", "--build-backend", "buildkit", "--publish", "--cache", "type=build;format=image;name=reg/x:cache"})
+				err := command.Execute()
+				h.AssertError(t, err, "--cache is not supported by the buildkit backend")
+			})
+
+			it("rejects --previous-image", func() {
+				command.SetArgs([]string{"--builder", "my-builder", "image", "--build-backend", "buildkit", "--publish", "--previous-image", "reg/x:prev"})
+				err := command.Execute()
+				h.AssertError(t, err, "--previous-image is not supported by the buildkit backend")
+			})
+
+			it("rejects --volume with a pointer to --binding", func() {
+				command.SetArgs([]string{"--builder", "my-builder", "image", "--build-backend", "buildkit", "--publish", "--volume", "/host:/target:ro"})
+				err := command.Execute()
+				h.AssertError(t, err, "--volume is not supported by the buildkit backend")
+				h.AssertError(t, err, "--binding")
+			})
+		})
+
 		when("a valid lifecycle-image is provided", func() {
 			when("only the image repo is provided", func() {
 				it("uses the provided lifecycle-image and parses it correctly", func() {
@@ -1063,6 +1103,28 @@ builder = "my-builder"
 			})
 		})
 
+		when("--pre-buildpack is provided", func() {
+			it("forwards the pre-buildpacks onto the client", func() {
+				mockClient.EXPECT().
+					Build(gomock.Any(), EqBuildOptionsWithPreBuildpacks([]string{"pre/one", "pre/two"})).
+					Return(nil)
+
+				command.SetArgs([]string{"image", "--builder", "my-builder", "--pre-buildpack", "pre/one", "--pre-buildpack", "pre/two"})
+				h.AssertNil(t, command.Execute())
+			})
+		})
+
+		when("--post-buildpack is provided", func() {
+			it("forwards the post-buildpacks onto the client", func() {
+				mockClient.EXPECT().
+					Build(gomock.Any(), EqBuildOptionsWithPostBuildpacks([]string{"post/one", "post/two"})).
+					Return(nil)
+
+				command.SetArgs([]string{"image", "--builder", "my-builder", "--post-buildpack", "post/one", "--post-buildpack", "post/two"})
+				h.AssertNil(t, command.Execute())
+			})
+		})
+
 		when("--insecure-registry is provided", func() {
 			it("sets one insecure registry", func() {
 				mockClient.EXPECT().
@@ -1170,7 +1232,7 @@ func EqBuildOptionsWithPlatform(platform string) gomock.Matcher {
 	return buildOptionsMatcher{
 		description: fmt.Sprintf("Platform=%s", platform),
 		equals: func(o client.BuildOptions) bool {
-			return o.Platform == platform
+			return len(o.Platforms) == 1 && o.Platforms[0] == platform
 		},
 	}
 }
@@ -1353,6 +1415,24 @@ func EqBuildOptionsWithExecEnv(s string) interface{} {
 		description: fmt.Sprintf("exec-env=%s", s),
 		equals: func(o client.BuildOptions) bool {
 			return o.CNBExecutionEnv == s
+		},
+	}
+}
+
+func EqBuildOptionsWithPreBuildpacks(preBuildpacks []string) gomock.Matcher {
+	return buildOptionsMatcher{
+		description: fmt.Sprintf("PreBuildpacks=%s", preBuildpacks),
+		equals: func(o client.BuildOptions) bool {
+			return reflect.DeepEqual(o.PreBuildpacks, preBuildpacks)
+		},
+	}
+}
+
+func EqBuildOptionsWithPostBuildpacks(postBuildpacks []string) gomock.Matcher {
+	return buildOptionsMatcher{
+		description: fmt.Sprintf("PostBuildpacks=%s", postBuildpacks),
+		equals: func(o client.BuildOptions) bool {
+			return reflect.DeepEqual(o.PostBuildpacks, postBuildpacks)
 		},
 	}
 }

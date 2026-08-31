@@ -468,7 +468,8 @@ func (b *Builder) Save(logger logging.Logger, creatorMetadata CreatorMetadata, a
 		return fmt.Errorf("failed to save builder %s as saving is not allowed", b.Name())
 	}
 
-	logger.Debugf("Creating builder with the following buildpacks:")
+	logger.Debugf("Builder creation completed, starting image save")
+	logger.Debugf("Builder contains the following buildpacks:")
 	for _, bpInfo := range b.metadata.Buildpacks {
 		logger.Debugf("-> %s", style.Symbol(bpInfo.FullName()))
 	}
@@ -1162,6 +1163,15 @@ func orderFileContents(order dist.Order, orderExt dist.Order) (string, error) {
 		return "", errors.Wrapf(err, "failed to marshal order.toml")
 	}
 	return buf.String(), nil
+}
+
+// OrderTOML serializes a resolved order (and extension order) to the canonical
+// /cnb/order.toml contents pack writes into a builder. It is the single source of
+// truth for order.toml formatting; callers that need the order.toml text (e.g. the
+// buildkit backend, which writes it into the builder over LLB) MUST use this rather
+// than re-deriving TOML from the builder's order label, so the two never diverge.
+func OrderTOML(order dist.Order, orderExt dist.Order) (string, error) {
+	return orderFileContents(order, orderExt)
 }
 
 func (b *Builder) systemLayer(system dist.System, dest string) (string, error) {

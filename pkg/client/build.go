@@ -5,12 +5,16 @@ import (
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
+	"path"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
@@ -21,8 +25,10 @@ import (
 	"github.com/buildpacks/imgutil/layout"
 	"github.com/buildpacks/imgutil/local"
 	"github.com/buildpacks/imgutil/remote"
+	"github.com/buildpacks/lifecycle/auth"
 	"github.com/buildpacks/lifecycle/platform/files"
 	"github.com/chainguard-dev/kaniko/pkg/util/proc"
+	"github.com/google/go-containerregistry/pkg/authn"
 	"github.com/google/go-containerregistry/pkg/name"
 	"github.com/moby/moby/client"
 	"github.com/pkg/errors"
@@ -30,6 +36,7 @@ import (
 
 	"github.com/buildpacks/pack/buildpackage"
 	"github.com/buildpacks/pack/internal/build"
+	"github.com/buildpacks/pack/internal/build/multiplatform"
 	"github.com/buildpacks/pack/internal/builder"
 	internalConfig "github.com/buildpacks/pack/internal/config"
 	"github.com/buildpacks/pack/internal/layer"
@@ -170,8 +177,28 @@ type BuildOptions struct {
 	// Process type that will be used when setting container start command.
 	DefaultProcessType string
 
-	// Platform is the desired platform to build on (e.g., linux/amd64)
-	Platform string
+	// Platforms is the list of target platforms to build for (e.g.
+	// ["linux/amd64"] or ["linux/amd64","linux/arm64"]). The default docker-daemon
+	// backend accepts a single platform; the buildkit backend accepts many and
+	// assembles them into one multi-arch image. When empty, the build defaults to
+	// the host platform.
+	Platforms []string
+
+	// BuildBackend selects the build backend. "" and "auto" resolve to
+	// "docker-daemon" (the standard single-arch daemon build). "buildkit" is the
+	// native multi-architecture backend (experimental). The abstraction is
+	// retained for a future buildah backend.
+	BuildBackend string
+
+	// BuildkitBuilder specifies the name of the buildx builder to use for multi-platform builds.
+	// If empty, the default builder is used.
+	BuildkitBuilder string
+
+	// BuildkitCacheFrom specifies external cache sources for buildkit (e.g., "type=registry,ref=...").
+	BuildkitCacheFrom []string
+
+	// BuildkitCacheTo specifies external cache destinations for buildkit.
+	BuildkitCacheTo []string
 
 	// Strategy for updating local images before a build.
 	PullPolicy image.PullPolicy
@@ -225,6 +252,13 @@ type BuildOptions struct {
 
 	// Directory to output the report.toml metadata artifact
 	ReportDestinationDir string
+
+	// Bindings are CNB service bindings to mount read-only at /platform/bindings/<name>.
+	// Each entry is "[<name>=]<host path>"; the host path is a directory containing a
+	// 'type' file (and optional 'provider' + secret files). Supported by all backends
+	// (the buildkit backend mounts them read-only into the lifecycle RUNs; the
+	// docker-daemon backend translates them to read-only volume mounts).
+	Bindings []string
 
 	// Desired create time in the output image config
 	CreationTime *time.Time
@@ -350,11 +384,15 @@ func (c *Client) Build(ctx context.Context, opts BuildOptions) error {
 		return errors.Wrapf(err, "invalid builder '%s'", opts.Builder)
 	}
 
+	// The daemon (single-arch) path derives its target from the first requested
+	// platform, if any. When no platform is requested it stays nil, and the
+	// builder fetch resolves to the daemon's host platform (host-native, as the
+	// standard build has always behaved).
 	requestedTarget := func() *dist.Target {
-		if opts.Platform == "" {
+		if len(opts.Platforms) == 0 {
 			return nil
 		}
-		parts := strings.Split(opts.Platform, "/")
+		parts := strings.Split(opts.Platforms[0], "/")
 		switch len(parts) {
 		case 0:
 			return nil
@@ -600,6 +638,22 @@ func (c *Client) Build(ctx context.Context, opts BuildOptions) error {
 		opts.ContainerConfig.Volumes = appendLayoutVolumes(opts.ContainerConfig.Volumes, pathsConfig)
 	}
 
+	// CNB service bindings (--binding). Parse + validate once. On the docker-daemon
+	// path they are delivered as read-only volume mounts at /platform/bindings/<name>
+	// (the same way bindings have always been delivered to the lifecycle container);
+	// on the buildkit path buildMultiPlatform mounts them read-only into the RUNs.
+	parsedBindings, err := parseBindings(opts.Bindings)
+	if err != nil {
+		return err
+	}
+	backendForBindings := multiplatform.BackendType(opts.BuildBackend).Resolve()
+	if backendForBindings != multiplatform.BackendBuildkit {
+		for _, b := range parsedBindings {
+			opts.ContainerConfig.Volumes = append(opts.ContainerConfig.Volumes,
+				fmt.Sprintf("%s:%s:ro", b.HostPath, path.Join(bindingsContainerDir, b.Name)))
+		}
+	}
+
 	processedVolumes, warnings, err := processVolumes(targetToUse.OS, opts.ContainerConfig.Volumes)
 	if err != nil {
 		return err
@@ -831,10 +885,509 @@ func (c *Client) Build(ctx context.Context, opts BuildOptions) error {
 		return ephemeralRunImageName, nil
 	}
 
+	// Native build routing: setting BuildBackend opts into the native (multi-platform,
+	// build-then-finalize) path. --platforms requires BuildBackend to be set.
+	// Route by backend. "" and "auto" resolve to docker-daemon (the standard
+	// single-arch daemon build); "buildkit" is the native multi-arch path.
+	backend := multiplatform.BackendType(opts.BuildBackend).Resolve()
+	if backend == multiplatform.BackendBuildkit {
+		if len(opts.Platforms) == 0 {
+			// No platform requested: default to the HOST platform so the build is
+			// native (no emulation), matching the standard daemon build. We do NOT
+			// fall back to the builder image's default arch here.
+			opts.Platforms = []string{runtime.GOOS + "/" + runtime.GOARCH}
+		}
+		// Stage the user-supplied buildpack modules (--buildpack/--pre-buildpack/
+		// --post-buildpack, incl. urn:cnb:registry + local refs) so the buildkit
+		// backend can sync them into the builder over LLB. from=builder / id-only
+		// refs contribute no content and are absent from fetchedBPs.
+		extraBPDir, cleanupExtraBPs, err := stageExtraBuildpacks(fetchedBPs)
+		if err != nil {
+			return err
+		}
+		defer cleanupExtraBPs()
+		return c.buildMultiPlatform(ctx, opts, lifecycleOpts, appPath, runImageName, extraBPDir, order, orderExtensions)
+	}
+
+	// docker-daemon backend: standard container-based build against the daemon.
+	// The per-command validation already enforces a single platform for it.
 	if err = c.lifecycleExecutor.Execute(ctx, lifecycleOpts); err != nil {
 		return fmt.Errorf("executing lifecycle: %w", err)
 	}
 	return c.logImageNameAndSha(ctx, opts.Publish, imageRef, opts.InsecureRegistries)
+}
+
+// buildMultiPlatform handles the multi-platform build path using BuildKit.
+// It constructs lifecycle phase commands, selects the appropriate backend,
+// and dispatches the build to the multi-platform executor.
+func (c *Client) buildMultiPlatform(ctx context.Context, opts BuildOptions, lifecycleOpts build.LifecycleOptions, appPath string, runImageName string, extraBuildpacksDir string, order dist.Order, orderExtensions dist.Order) error {
+	platforms, err := multiplatform.ParsePlatformList(opts.Platforms)
+	if err != nil {
+		return fmt.Errorf("parsing platforms: %w", err)
+	}
+
+	// Multi-platform builds require --publish (can't load multi-arch manifest to local daemon)
+	if !opts.Publish {
+		c.logger.Info("Multi-platform build without --publish: images will be built but not pushed. Use --publish to create a manifest list.")
+	}
+
+	// Order.toml written into the builder over LLB. Use the SAME resolved order
+	// processBuildpacks computed (builder + descriptor + --buildpack + pre/post,
+	// with the identical precedence the daemon backend uses) and serialize it with
+	// pack's canonical builder.OrderTOML — NOT a re-derivation from the builder's
+	// order label. This guarantees the buildkit detection order matches the daemon's
+	// and keeps a single source of truth for both the ordering decision and its
+	// serialization.
+	var orderToml string
+	if len(order) > 0 && len(order[0].Group) > 0 {
+		orderToml, err = builder.OrderTOML(order, orderExtensions)
+		if err != nil {
+			return fmt.Errorf("serializing buildpack order: %w", err)
+		}
+		c.logger.Debugf("Injecting resolved buildpack order into the buildkit builder")
+	}
+
+	// Construct the lifecycle phase commands from the lifecycle options
+	phases := buildLifecyclePhases(lifecycleOpts, runImageName, c.logger.IsVerbose())
+
+	// Generate a cache ID based on the image name
+	cacheID := fmt.Sprintf("pack-cache-%s", sanitizeCacheID(lifecycleOpts.Image.Name()))
+
+	// Generate a short build ID for ephemeral per-arch tags
+	buildID := generateBuildID()
+
+	// Resolve docker config path for registry auth
+	dockerConfigPath := resolveDockerConfigPath()
+
+	// Collect user-supplied build-time env (project.toml [[build.env]] first, then
+	// --env / --env-file overrides) exactly like the standard path (see the buildEnvs
+	// map in Build). These are written to /platform/env by the backend so buildpacks
+	// read them as BP_* configuration.
+	buildEnvs := map[string]string{}
+	for _, envVar := range opts.ProjectDescriptor.Build.Env {
+		buildEnvs[envVar.Name] = envVar.Value
+	}
+	for k, v := range opts.Env {
+		buildEnvs[k] = v
+	}
+
+	// CNB platform env parity with standard pack.
+	experimentalMode := ""
+	if c.experimental {
+		experimentalMode = "warn"
+	}
+	sourceDateEpoch := ""
+	if opts.CreationTime != nil {
+		sourceDateEpoch = strconv.Itoa(int(opts.CreationTime.Unix()))
+	}
+
+	// Resolve proxy config the same way the standard path does (explicit opts, else
+	// host env), so buildpacks can fetch dependencies behind a proxy.
+	proxyConfig := c.processProxyConfig(opts.ProxyConfig)
+
+	// CNB service bindings (--binding): parsed + validated, then mounted read-only at
+	// /platform/bindings/<name> by the backend. Already validated in Build(); re-parse
+	// here to the backend's mount type.
+	parsedBindings, err := parseBindings(opts.Bindings)
+	if err != nil {
+		return err
+	}
+	bindings := make([]multiplatform.BindingMount, len(parsedBindings))
+	for i, b := range parsedBindings {
+		bindings[i] = multiplatform.BindingMount{Name: b.Name, HostPath: b.HostPath}
+	}
+
+	// Build the platform options (shared across all architectures)
+	platformBuildOpts := multiplatform.PlatformBuildOpts{
+		BuilderImage:     lifecycleOpts.BuilderImage,
+		LifecycleImage:   lifecycleOpts.LifecycleImage,
+		RunImage:         runImageName,
+		AppPath:          appPath,
+		Phases:           phases,
+		CacheID:          cacheID,
+		BuildID:          buildID,
+		ImageName:        lifecycleOpts.Image.Name(),
+		Publish:          opts.Publish,
+		DockerConfigPath: dockerConfigPath,
+		BuilderUID:       lifecycleOpts.Builder.UID(),
+		BuilderGID:       lifecycleOpts.Builder.GID(),
+		PlatformAPI:      negotiatePlatformAPI(lifecycleOpts),
+		FileFilter:       lifecycleOpts.FileFilter,
+		Network:          opts.ContainerConfig.Network,
+		ExtraBuildpacksDir: extraBuildpacksDir,
+		OrderToml:          orderToml,
+		ClearCache:       opts.ClearCache,
+		RegistryAuth:     buildRegistryAuth(c.keychain, lifecycleOpts),
+		// Advertise the builder's stack id + OS distro to the lifecycle/buildpacks so
+		// buildpack dependency resolution can pick stack/target-specific PREBUILT
+		// dependencies instead of compiling from source (see native_buildfunc env).
+		StackID:             builderImageLabel(lifecycleOpts.Builder.Image(), "io.buildpacks.stack.id"),
+		TargetDistroName:    builderDistroLabel(lifecycleOpts.Builder.Image(), "name"),
+		TargetDistroVersion: builderDistroLabel(lifecycleOpts.Builder.Image(), "version"),
+		BuildEnv:            buildEnvs,
+		ExperimentalMode:    experimentalMode,
+		SourceDateEpoch:     sourceDateEpoch,
+		HTTPProxy:           proxyConfig.HTTPProxy,
+		HTTPSProxy:          proxyConfig.HTTPSProxy,
+		NoProxy:             proxyConfig.NoProxy,
+		Keychain:            c.keychain,
+		DefaultProcessType:   opts.DefaultProcessType,
+		AdditionalTags:       opts.AdditionalTags,
+		SBOMDestinationDir:   opts.SBOMDestinationDir,
+		ReportDestinationDir: opts.ReportDestinationDir,
+		Bindings:             bindings,
+		OverrideUID:          opts.UserID,
+		OverrideGID:          opts.GroupID,
+		Workspace:            opts.Workspace,
+		ExecutionEnv:         opts.CNBExecutionEnv,
+	}
+
+	// If the user explicitly passed --lifecycle-image, use it regardless of trust mode
+	if opts.LifecycleImage != "" {
+		platformBuildOpts.LifecycleImage = opts.LifecycleImage
+	}
+
+	// Create the backend
+	buildkitOpts := multiplatform.BuildkitOpts{
+		Builder:   opts.BuildkitBuilder,
+		CacheFrom: opts.BuildkitCacheFrom,
+		CacheTo:   opts.BuildkitCacheTo,
+	}
+
+	backend, err := multiplatform.NewBackend(ctx, multiplatform.BackendType(opts.BuildBackend), c.logger, buildkitOpts)
+	if err != nil {
+		return fmt.Errorf("initializing build backend: %w", err)
+	}
+
+	// Create and run the multi-platform executor
+	executor := multiplatform.NewExecutor(backend, c.logger)
+
+	multiOpts := multiplatform.MultiPlatformBuildOpts{
+		Platforms:        platforms,
+		BuildOpts:        platformBuildOpts,
+		BuildkitOpts:     buildkitOpts,
+		Logger:           c.logger,
+		ManifestListName: lifecycleOpts.Image.Name(),
+		Publish:          opts.Publish,
+	}
+
+	results, err := executor.Execute(ctx, multiOpts)
+	if err != nil {
+		return fmt.Errorf("multi-platform build: %w", err)
+	}
+
+	c.logger.Infof("Successfully built %d platform image(s)", len(results))
+	for _, r := range results {
+		c.logger.Infof("  %s: %s", r.Platform.String(), r.ImageRef)
+	}
+
+	return nil
+}
+
+// buildLifecyclePhases constructs the ordered list of lifecycle phase commands
+// from the lifecycle options. This translates the same logic used by LifecycleExecution
+// to determine phase arguments into PhaseCommand structs for the multi-platform executor.
+func buildLifecyclePhases(opts build.LifecycleOptions, runImage string, verbose bool) []multiplatform.PhaseCommand {
+	imageName := opts.Image.Name()
+
+	// Only add -log-level debug when the user passed --verbose
+	var logArgs []string
+	if verbose {
+		logArgs = []string{"-log-level", "debug"}
+	}
+
+	analyzerArgs := append(logArgs, "-run-image", runImage, imageName)
+	detectorArgs := append(logArgs, "-app", "/workspace")
+	restorerArgs := append(logArgs, "-cache-dir", "/cache")
+	builderArgs := append(logArgs, "-app", "/workspace")
+	exporterArgs := append(logArgs, "-app", "/workspace", "-cache-dir", "/cache", imageName)
+
+	phases := []multiplatform.PhaseCommand{
+		{
+			Name:              "analyzer",
+			Binary:            "/cnb/lifecycle/analyzer",
+			Args:              analyzerArgs,
+			NeedsRegistryAuth: true,
+			NeedsCache:        false,
+		},
+		{
+			Name:   "detector",
+			Binary: "/cnb/lifecycle/detector",
+			Args:   detectorArgs,
+		},
+		{
+			Name:       "restorer",
+			Binary:     "/cnb/lifecycle/restorer",
+			Args:       restorerArgs,
+			NeedsCache: true,
+		},
+		{
+			Name:   "builder",
+			Binary: "/cnb/lifecycle/builder",
+			Args:   builderArgs,
+		},
+		{
+			Name:              "exporter",
+			Binary:            "/cnb/lifecycle/exporter",
+			Args:              exporterArgs,
+			NeedsRegistryAuth: true,
+			NeedsCache:        true,
+		},
+	}
+
+	return phases
+}
+
+// sanitizeCacheID creates a filesystem/buildkit-safe cache identifier from an image name.
+func sanitizeCacheID(imageName string) string {
+	// Replace characters that aren't valid in buildkit cache IDs
+	replacer := strings.NewReplacer("/", "_", ":", "_", ".", "-")
+	return replacer.Replace(imageName)
+}
+
+// generateBuildID creates a short unique identifier for ephemeral build tags.
+func generateBuildID() string {
+	b := make([]byte, 4)
+	rand.Read(b)
+	return hex.EncodeToString(b)
+}
+
+// buildRegistryAuth resolves registry credentials from the keychain and returns the
+// CNB_REGISTRY_AUTH JSON value. This eliminates the need for docker config file mounts
+// inside buildkit — the lifecycle reads this env var directly.
+func buildRegistryAuth(keychain authn.Keychain, opts build.LifecycleOptions) string {
+	images := []string{opts.Image.String(), opts.RunImage}
+	if opts.CacheImage != "" {
+		images = append(images, opts.CacheImage)
+	}
+	if opts.PreviousImage != "" {
+		images = append(images, opts.PreviousImage)
+	}
+	authVar, err := auth.BuildEnvVar(keychain, images...)
+	if err != nil {
+		return ""
+	}
+	return authVar
+}
+
+// resolveDockerConfigPath returns a path to a docker config.json file that contains
+// inline auth credentials. If the user's config uses a credential store (credsStore),
+// the credentials are extracted and written to a temporary config file that buildkit
+// can read without needing external credential helpers.
+func resolveDockerConfigPath() string {
+	configDir := os.Getenv("DOCKER_CONFIG")
+	if configDir == "" {
+		homeDir, err := os.UserHomeDir()
+		if err != nil {
+			return ""
+		}
+		configDir = filepath.Join(homeDir, ".docker")
+	}
+	configPath := filepath.Join(configDir, "config.json")
+	if _, err := os.Stat(configPath); err != nil {
+		return ""
+	}
+
+	// Check if the config uses a credential store
+	data, err := os.ReadFile(configPath)
+	if err != nil {
+		return configPath
+	}
+
+	var config map[string]interface{}
+	if err := json.Unmarshal(data, &config); err != nil {
+		return configPath
+	}
+
+	// If no credsStore, the config has inline auth — use it directly
+	credsStore, hasCredsStore := config["credsStore"]
+	if !hasCredsStore || credsStore == "" {
+		return configPath
+	}
+
+	// credsStore is set — extract credentials using the helper
+	helperName := fmt.Sprintf("docker-credential-%s", credsStore)
+	auths, ok := config["auths"].(map[string]interface{})
+	if !ok {
+		return configPath
+	}
+
+	resolvedAuths := map[string]interface{}{}
+	for registry := range auths {
+		creds, err := getCredentialsFromHelper(helperName, registry)
+		if err == nil && creds != "" {
+			resolvedAuths[registry] = map[string]string{"auth": creds}
+		}
+	}
+
+	if len(resolvedAuths) == 0 {
+		return configPath
+	}
+
+	// Write resolved credentials to a temp file
+	tmpConfig := map[string]interface{}{"auths": resolvedAuths}
+	tmpData, err := json.Marshal(tmpConfig)
+	if err != nil {
+		return configPath
+	}
+
+	tmpFile, err := os.CreateTemp("", "pack-docker-config-*.json")
+	if err != nil {
+		return configPath
+	}
+	if _, err := tmpFile.Write(tmpData); err != nil {
+		tmpFile.Close()
+		return configPath
+	}
+	tmpFile.Close()
+	return tmpFile.Name()
+}
+
+// getCredentialsFromHelper calls the docker credential helper to get auth for a registry.
+func getCredentialsFromHelper(helperName, registry string) (string, error) {
+	cmd := exec.Command(helperName, "get")
+	cmd.Stdin = strings.NewReader(registry)
+	output, err := cmd.Output()
+	if err != nil {
+		return "", err
+	}
+
+	var creds struct {
+		Username string `json:"Username"`
+		Secret   string `json:"Secret"`
+	}
+	if err := json.Unmarshal(output, &creds); err != nil {
+		return "", err
+	}
+
+	if creds.Username == "" || creds.Secret == "" {
+		return "", fmt.Errorf("empty credentials")
+	}
+
+	// Encode as base64 auth
+	auth := fmt.Sprintf("%s:%s", creds.Username, creds.Secret)
+	return fmt.Sprintf("%s", base64Encode(auth)), nil
+}
+
+func base64Encode(s string) string {
+	encoded := make([]byte, base64.StdEncoding.EncodedLen(len(s)))
+	base64.StdEncoding.Encode(encoded, []byte(s))
+	return string(encoded)
+}
+
+// negotiatePlatformAPI finds the latest platform API supported by both pack and the builder's lifecycle.
+func negotiatePlatformAPI(opts build.LifecycleOptions) string {
+	builderAPIs := append(
+		opts.Builder.LifecycleDescriptor().APIs.Platform.Deprecated,
+		opts.Builder.LifecycleDescriptor().APIs.Platform.Supported...,
+	)
+	// Find the highest platform API version supported by both pack and the builder
+	for i := len(build.SupportedPlatformAPIVersions) - 1; i >= 0; i-- {
+		for _, builderAPI := range builderAPIs {
+			if build.SupportedPlatformAPIVersions[i].Compare(builderAPI) == 0 {
+				return build.SupportedPlatformAPIVersions[i].String()
+			}
+		}
+	}
+	// Fallback to the latest pack supports (will likely fail at runtime with a clear error)
+	return build.SupportedPlatformAPIVersions[len(build.SupportedPlatformAPIVersions)-1].String()
+}
+
+// stageExtraBuildpacks materializes the user-supplied buildpack modules (the
+// modules FETCHED for --buildpack / --pre-buildpack / --post-buildpack, including
+// urn:cnb:registry and local-tarball/dir refs — resolved uniformly by
+// processBuildpacks) into a single staging directory laid out exactly as the CNB
+// distribution spec expects them inside the builder: /cnb/buildpacks/{id}/{ver}/*.
+//
+// The buildkit backend has already pulled the builder as a content-addressed
+// llb.Image; it syncs this staging dir in and llb.Copy's it over the builder's
+// /cnb/buildpacks before detect, so an added buildpack participates and a
+// same-id/version buildpack OVERRIDES the builder's copy (the "test a local
+// buildpack change" use case). These modules live only in the transient builder
+// state — the final image is assembled FROM the run image, so they never leak into
+// the output. It returns the staging dir ("" when there are no extra modules) and a
+// cleanup func the caller must defer.
+//
+// fetchedBPs contains only modules that were actually downloaded/read (from=builder
+// / id-only references produce no content and are not present here), so every
+// module here has real content to inject.
+func stageExtraBuildpacks(fetchedBPs []buildpack.BuildModule) (dir string, cleanup func(), err error) {
+	if len(fetchedBPs) == 0 {
+		return "", func() {}, nil
+	}
+	stageDir, err := os.MkdirTemp("", "pack-bk-extra-bps")
+	if err != nil {
+		return "", func() {}, errors.Wrap(err, "creating buildpack staging dir")
+	}
+	cleanup = func() { _ = os.RemoveAll(stageDir) }
+
+	for _, bp := range fetchedBPs {
+		if err := extractModuleToDir(bp, stageDir); err != nil {
+			cleanup()
+			return "", func() {}, errors.Wrapf(err, "staging buildpack %s", bp.Descriptor().Info().FullName())
+		}
+	}
+	return stageDir, cleanup, nil
+}
+
+// extractModuleToDir untars a BuildModule (whose Open() yields a tar with entries
+// under /cnb/buildpacks/{id}/{version}/*) into destDir, preserving the relative
+// paths so destDir mirrors the on-builder filesystem. Paths are cleaned and guarded
+// against traversal outside destDir.
+func extractModuleToDir(module buildpack.BuildModule, destDir string) error {
+	rc, err := module.Open()
+	if err != nil {
+		return errors.Wrap(err, "opening module")
+	}
+	defer rc.Close()
+
+	tr := tar.NewReader(rc)
+	for {
+		hdr, err := tr.Next()
+		if err == io.EOF {
+			return nil
+		}
+		if err != nil {
+			return errors.Wrap(err, "reading module tar")
+		}
+		// Normalize a leading slash so /cnb/... becomes cnb/... joined under destDir.
+		clean := filepath.Clean("/" + hdr.Name)
+		target := filepath.Join(destDir, clean)
+		// Guard against path traversal.
+		if !strings.HasPrefix(target, filepath.Clean(destDir)+string(os.PathSeparator)) && target != filepath.Clean(destDir) {
+			return errors.Errorf("module tar entry %q escapes staging dir", hdr.Name)
+		}
+		switch hdr.Typeflag {
+		case tar.TypeDir:
+			if err := os.MkdirAll(target, os.FileMode(hdr.Mode)|0o111); err != nil {
+				return errors.Wrapf(err, "mkdir %s", target)
+			}
+		case tar.TypeReg:
+			if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+				return errors.Wrapf(err, "mkdir parent of %s", target)
+			}
+			fh, err := os.OpenFile(target, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, os.FileMode(hdr.Mode))
+			if err != nil {
+				return errors.Wrapf(err, "create %s", target)
+			}
+			if _, err := io.Copy(fh, tr); err != nil { //nolint:gosec // module tars are pack-produced, sizes bounded by the buildpack
+				fh.Close()
+				return errors.Wrapf(err, "write %s", target)
+			}
+			fh.Close()
+		case tar.TypeSymlink:
+			if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+				return errors.Wrapf(err, "mkdir parent of symlink %s", target)
+			}
+			// Best-effort: recreate the symlink as recorded in the module tar.
+			_ = os.Remove(target)
+			if err := os.Symlink(hdr.Linkname, target); err != nil {
+				return errors.Wrapf(err, "symlink %s -> %s", target, hdr.Linkname)
+			}
+		default:
+			// Skip other entry types (hardlinks/devices are not expected in module tars).
+		}
+	}
 }
 
 func usesContainerdStorage(docker DockerClient) bool {
@@ -850,6 +1403,88 @@ func usesContainerdStorage(docker DockerClient) bool {
 	}
 
 	return false
+}
+
+// bindingsContainerDir is the CNB platform bindings directory buildpacks read
+// (under the platform dir, /platform/bindings by convention).
+const bindingsContainerDir = "/platform/bindings"
+
+// bindingMount is a parsed --binding entry: a host directory and the binding name
+// it is exposed under at /platform/bindings/<name>.
+type bindingMount struct {
+	Name     string
+	HostPath string
+}
+
+// parseBindings parses --binding values of the form "[<name>=]<host path>". The
+// host path must be an existing directory; the CNB convention is that it contains a
+// 'type' file (and optional 'provider' + secret files). When no name is given, the
+// directory's base name is used. Names must be simple path segments (no '/').
+func parseBindings(raw []string) ([]bindingMount, error) {
+	var out []bindingMount
+	seen := map[string]bool{}
+	for _, entry := range raw {
+		name := ""
+		hostPath := entry
+		if i := strings.Index(entry, "="); i >= 0 {
+			name = strings.TrimSpace(entry[:i])
+			hostPath = strings.TrimSpace(entry[i+1:])
+		}
+		if hostPath == "" {
+			return nil, fmt.Errorf("invalid --binding %q: missing host path", entry)
+		}
+		abs, err := filepath.Abs(hostPath)
+		if err != nil {
+			return nil, fmt.Errorf("invalid --binding %q: %w", entry, err)
+		}
+		info, err := os.Stat(abs)
+		if err != nil {
+			return nil, fmt.Errorf("invalid --binding %q: %w", entry, err)
+		}
+		if !info.IsDir() {
+			return nil, fmt.Errorf("invalid --binding %q: host path %q is not a directory", entry, abs)
+		}
+		if name == "" {
+			name = filepath.Base(abs)
+		}
+		if strings.ContainsAny(name, `/\`) {
+			return nil, fmt.Errorf("invalid --binding %q: binding name %q must not contain a path separator", entry, name)
+		}
+		if seen[name] {
+			return nil, fmt.Errorf("invalid --binding %q: duplicate binding name %q", entry, name)
+		}
+		seen[name] = true
+		out = append(out, bindingMount{Name: name, HostPath: abs})
+	}
+	return out, nil
+}
+
+// builderImageLabel reads a single label off the builder image, returning "" on
+// error or when absent.
+func builderImageLabel(img imgutil.Image, key string) string {
+	if img == nil {
+		return ""
+	}
+	if v, err := img.Label(key); err == nil {
+		return v
+	}
+	return ""
+}
+
+// builderDistroLabel reads the builder's OS distro name/version from its image
+// labels, trying the modern "io.buildpacks.base.distro.*" label first and falling
+// back to the older "io.buildpacks.stack.distro.*". Returns "" if unavailable
+// (distro is advisory for dependency resolution; the stack id is the primary key).
+func builderDistroLabel(img imgutil.Image, which string) string {
+	for _, key := range []string{
+		"io.buildpacks.base.distro." + which,
+		"io.buildpacks.stack.distro." + which,
+	} {
+		if v := builderImageLabel(img, key); v != "" {
+			return v
+		}
+	}
+	return ""
 }
 
 func getTargetFromBuilder(builderImage imgutil.Image) (*dist.Target, error) {

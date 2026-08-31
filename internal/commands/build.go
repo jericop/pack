@@ -15,6 +15,7 @@ import (
 
 	bldr "github.com/buildpacks/pack/internal/builder"
 
+	"github.com/buildpacks/pack/internal/build/multiplatform"
 	"github.com/buildpacks/pack/internal/config"
 	"github.com/buildpacks/pack/internal/style"
 	"github.com/buildpacks/pack/pkg/cache"
@@ -26,44 +27,49 @@ import (
 )
 
 type BuildFlags struct {
-	Publish                bool
-	ClearCache             bool
-	DisableSystemBuilpacks bool
-	TrustBuilder           bool
-	TrustExtraBuildpacks   bool
-	Interactive            bool
-	Sparse                 bool
-	EnableUsernsHost       bool
-	DockerHost             string
-	CacheImage             string
-	Cache                  cache.CacheOpts
-	AppPath                string
-	Builder                string
-	ExecutionEnv           string
-	Registry               string
-	RunImage               string
-	Platform               string
-	Policy                 string
-	Network                string
-	DescriptorPath         string
-	DefaultProcessType     string
-	LifecycleImage         string
-	Env                    []string
-	EnvFiles               []string
-	Buildpacks             []string
-	Extensions             []string
-	Volumes                []string
-	AdditionalTags         []string
-	Workspace              string
-	GID                    int
-	UID                    int
-	PreviousImage          string
-	SBOMDestinationDir     string
-	ReportDestinationDir   string
-	DateTime               string
-	PreBuildpacks          []string
-	PostBuildpacks         []string
-	InsecureRegistries     []string
+	Publish                   bool
+	ClearCache                bool
+	DisableSystemBuilpacks    bool
+	TrustBuilder              bool
+	TrustExtraBuildpacks      bool
+	Interactive               bool
+	Sparse                    bool
+	EnableUsernsHost          bool
+	DockerHost                string
+	CacheImage                string
+	Cache                     cache.CacheOpts
+	AppPath                   string
+	Builder                   string
+	ExecutionEnv              string
+	Registry                  string
+	RunImage                  string
+	Platforms                 []string
+	BuildBackend              string
+	BuildkitBuilder           string
+	BuildkitCacheFrom         []string
+	BuildkitCacheTo           []string
+	Policy                    string
+	Network                   string
+	DescriptorPath            string
+	DefaultProcessType        string
+	LifecycleImage            string
+	Env                       []string
+	EnvFiles                  []string
+	Buildpacks                []string
+	Extensions                []string
+	Volumes                   []string
+	Bindings                  []string
+	AdditionalTags            []string
+	Workspace                 string
+	GID                       int
+	UID                       int
+	PreviousImage             string
+	SBOMDestinationDir        string
+	ReportDestinationDir      string
+	DateTime                  string
+	PreBuildpacks             []string
+	PostBuildpacks            []string
+	InsecureRegistries        []string
 }
 
 // Build an image from source code
@@ -175,19 +181,23 @@ func Build(logger logging.Logger, cfg config.Config, packClient PackClient) *cob
 				return errors.Wrapf(err, "parsing creation time %s", flags.DateTime)
 			}
 			if err := packClient.Build(cmd.Context(), client.BuildOptions{
-				AppPath:           flags.AppPath,
-				Builder:           builder,
-				Registry:          flags.Registry,
-				AdditionalMirrors: getMirrors(cfg),
-				AdditionalTags:    flags.AdditionalTags,
-				RunImage:          flags.RunImage,
-				Env:               env,
-				Image:             inputImageName.Name(),
-				Publish:           flags.Publish,
-				DockerHost:        flags.DockerHost,
-				Platform:          flags.Platform,
-				PullPolicy:        pullPolicy,
-				ClearCache:        flags.ClearCache,
+				AppPath:                   flags.AppPath,
+				Builder:                   builder,
+				Registry:                  flags.Registry,
+				AdditionalMirrors:         getMirrors(cfg),
+				AdditionalTags:            flags.AdditionalTags,
+				RunImage:                  flags.RunImage,
+				Env:                       env,
+				Image:                     inputImageName.Name(),
+				Publish:                   flags.Publish,
+				DockerHost:                flags.DockerHost,
+				Platforms:                 flags.Platforms,
+				BuildBackend:              flags.BuildBackend,
+				BuildkitBuilder:           flags.BuildkitBuilder,
+				BuildkitCacheFrom:         flags.BuildkitCacheFrom,
+				BuildkitCacheTo:           flags.BuildkitCacheTo,
+				PullPolicy:                pullPolicy,
+				ClearCache:                flags.ClearCache,
 				TrustBuilder: func(string) bool {
 					return trustBuilder
 				},
@@ -198,6 +208,7 @@ func Build(logger logging.Logger, cfg config.Config, packClient PackClient) *cob
 					Network: flags.Network,
 					Volumes: flags.Volumes,
 				},
+				Bindings:                 flags.Bindings,
 				DefaultProcessType:       flags.DefaultProcessType,
 				ProjectDescriptorBaseDir: filepath.Dir(actualDescriptorPath),
 				ProjectDescriptor:        descriptor,
@@ -285,7 +296,11 @@ Special value 'inherit' may be used in which case DOCKER_HOST environment variab
 This option may set DOCKER_HOST environment variable for the build container if needed.
 `)
 	cmd.Flags().StringVar(&buildFlags.LifecycleImage, "lifecycle-image", cfg.LifecycleImage, `Custom lifecycle image to use for analysis, restore, and export when builder is untrusted.`)
-	cmd.Flags().StringVar(&buildFlags.Platform, "platform", "", `Platform to build on (e.g., "linux/amd64").`)
+	cmd.Flags().StringArrayVar(&buildFlags.Platforms, "platform", nil, `Target platform to build for (e.g., "linux/amd64"). May be repeated (or comma-separated) to build multiple platforms in one image, e.g. --platform linux/amd64 --platform linux/arm64. The default (docker-daemon) backend accepts a single platform; --build-backend buildkit accepts many. Defaults to the host platform when omitted.`)
+	cmd.Flags().StringVar(&buildFlags.BuildBackend, "build-backend", "", `[experimental] Build backend. "docker-daemon" (default; standard single-arch build against the local Docker daemon), "buildkit" (native multi-architecture build), or "auto" (resolves to docker-daemon). "buildah" is planned.`)
+	cmd.Flags().StringVar(&buildFlags.BuildkitBuilder, "buildkit-builder", "", `Name of the buildx builder to use for multi-platform builds (default: current buildx default).`)
+	cmd.Flags().StringArrayVar(&buildFlags.BuildkitCacheFrom, "buildkit-cache-from", nil, `External cache source for buildkit (e.g., "type=registry,ref=myapp-cache:latest").`)
+	cmd.Flags().StringArrayVar(&buildFlags.BuildkitCacheTo, "buildkit-cache-to", nil, `External cache destination for buildkit (e.g., "type=registry,ref=myapp-cache:latest,mode=max").`)
 	cmd.Flags().StringVar(&buildFlags.Policy, "pull-policy", "", `Pull policy to use. Accepted values are always, never, and if-not-present. (default "always")`)
 	cmd.Flags().StringVar(&buildFlags.ExecutionEnv, "exec-env", "production", `Execution environment to use. (default "production"`)
 	cmd.Flags().StringVarP(&buildFlags.Registry, "buildpack-registry", "r", cfg.DefaultRegistryName, "Buildpack Registry by name")
@@ -294,6 +309,7 @@ This option may set DOCKER_HOST environment variable for the build container if 
 	cmd.Flags().BoolVar(&buildFlags.TrustBuilder, "trust-builder", false, "Trust the provided builder.\nAll lifecycle phases will be run in a single container.\nFor more on trusted builders, and when to trust or untrust a builder, check out our docs here: https://buildpacks.io/docs/tools/pack/concepts/trusted_builders")
 	cmd.Flags().BoolVar(&buildFlags.TrustExtraBuildpacks, "trust-extra-buildpacks", false, "Trust buildpacks that are provided in addition to the buildpacks on the builder")
 	cmd.Flags().StringArrayVar(&buildFlags.Volumes, "volume", nil, "Mount host volume into the build container, in the form '<host path>:<target path>[:<options>]'.\n- 'host path': Name of the volume or absolute directory path to mount.\n- 'target path': The path where the file or directory is available in the container.\n- 'options' (default \"ro\"): An optional comma separated list of mount options.\n    - \"ro\", volume contents are read-only.\n    - \"rw\", volume contents are readable and writeable.\n    - \"volume-opt=<key>=<value>\", can be specified more than once, takes a key-value pair consisting of the option name and its value."+stringArrayHelp("volume"))
+	cmd.Flags().StringArrayVar(&buildFlags.Bindings, "binding", nil, "Provide a CNB service binding, mounted read-only at /platform/bindings/<name>, in the form '[<name>=]<host path>'.\n- 'host path': Absolute path to a binding directory containing a 'type' file (and optional 'provider' + secret files).\n- 'name' (default: the directory's base name): The binding name buildpacks see under /platform/bindings.\nUnlike --volume, bindings are always read-only and are supported by every build backend."+stringArrayHelp("binding"))
 	cmd.Flags().StringVar(&buildFlags.Workspace, "workspace", "", "Location at which to mount the app dir in the build image")
 	cmd.Flags().IntVar(&buildFlags.GID, "gid", 0, `Override GID of user's group in the stack's build and run images. The provided value must be a positive number`)
 	cmd.Flags().IntVar(&buildFlags.UID, "uid", 0, `Override UID of user in the stack's build and run images. The provided value must be a positive number`)
@@ -306,6 +322,10 @@ This option may set DOCKER_HOST environment variable for the build container if 
 	if !cfg.Experimental {
 		cmd.Flags().MarkHidden("interactive")
 		cmd.Flags().MarkHidden("sparse")
+		cmd.Flags().MarkHidden("build-backend")
+		cmd.Flags().MarkHidden("buildkit-builder")
+		cmd.Flags().MarkHidden("buildkit-cache-from")
+		cmd.Flags().MarkHidden("buildkit-cache-to")
 	}
 }
 
@@ -359,7 +379,103 @@ func validateBuildFlags(flags *BuildFlags, cfg config.Config, inputImageRef clie
 		}
 	}
 
+	// Normalize --platform (repeatable, comma-split friendly) in place so the rest
+	// of the pipeline sees a clean list.
+	flags.Platforms = splitPlatforms(flags.Platforms)
+
+	// Selecting a native backend (currently only buildkit) is experimental.
+	backend := multiplatform.BackendType(flags.BuildBackend).Resolve()
+	if backend != multiplatform.BackendDockerDaemon && !cfg.Experimental {
+		return client.NewExperimentError("Native (multi-platform) builds are currently experimental. Run 'pack config experimental true' to enable.")
+	}
+
+	// The number of target platforms a build may specify is a property of the
+	// backend (its capabilities), not a per-backend CLI branch. MaxPlatforms == 1
+	// means single-arch only; 0 means unlimited.
+	caps := backend.Capabilities()
+	if caps.MaxPlatforms == 1 && len(flags.Platforms) > 1 {
+		return errors.Errorf("the %s backend supports a single --platform; use --build-backend buildkit to build multiple platforms in one image", backend)
+	}
+
+	// The lifecycle-cache flags (--cache / --cache-image / --clear-cache) belong to
+	// the docker-daemon backend. Registry-native backends (buildkit) use their own
+	// build-engine cache (--buildkit-cache-from / --buildkit-cache-to) and never
+	// delete anything from a registry, so --clear-cache is meaningless there. Reject
+	// these flags on a backend that does not use the lifecycle cache rather than
+	// silently ignoring them. This rule lives with the backend capability.
+	if !caps.UsesLifecycleCache {
+		var offending []string
+		if flags.CacheImage != "" {
+			offending = append(offending, "--cache-image")
+		}
+		if flags.ClearCache {
+			offending = append(offending, "--clear-cache")
+		}
+		if cacheFlagProvided(flags.Cache) {
+			offending = append(offending, "--cache")
+		}
+		if len(offending) > 0 {
+			return errors.Errorf(
+				"%s is not supported by the %s backend; it applies to the docker-daemon backend. Use --buildkit-cache-from / --buildkit-cache-to for buildkit build caching.",
+				strings.Join(offending, ", "), backend,
+			)
+		}
+	}
+
+	// --previous-image is a docker-daemon capability: the analyzer reads a prior
+	// image's layer metadata so the exporter can reuse unchanged layers by reference.
+	// The buildkit backend gets layer-blob reuse from BuildKit's content-addressed
+	// cache and authors metadata from the actual produced layers, so it does not honor
+	// --previous-image. Reject it rather than silently ignore it.
+	if !caps.SupportsPreviousImage && flags.PreviousImage != "" {
+		return errors.Errorf(
+			"--previous-image is not supported by the %s backend; it applies to the docker-daemon backend. The buildkit backend reuses unchanged layers via BuildKit's content-addressed cache.",
+			backend,
+		)
+	}
+
+	// --volume mounts a live host path into the lifecycle container. The buildkit
+	// backend builds in a sandbox with no docker-run-style bind mount, so read-write
+	// host mounts are impossible and read-only host data would be a point-in-time sync
+	// rather than a live bind. Reject it rather than silently changing semantics; for
+	// read-only CNB service bindings use --binding instead.
+	if !caps.SupportsHostVolumes && len(flags.Volumes) > 0 {
+		return errors.Errorf(
+			"--volume is not supported by the %s backend; it mounts a live host path into the build, which BuildKit's sandboxed model cannot provide. For read-only CNB service bindings, use --binding.",
+			backend,
+		)
+	}
+
 	return nil
+}
+
+// cacheFlagProvided reports whether the user supplied a --cache option (any of the
+// build/launch/kaniko cache entries carries a source or a non-default format).
+func cacheFlagProvided(c cache.CacheOpts) bool {
+	for _, ci := range []cache.CacheInfo{c.Build, c.Launch, c.Kaniko} {
+		if ci.Source != "" || ci.Format != cache.CacheVolume {
+			return true
+		}
+	}
+	return false
+}
+
+// splitPlatforms flattens a repeatable --platform flag (each value may itself be
+// a comma-separated list) into a de-duplicated, trimmed slice, preserving order.
+func splitPlatforms(in []string) []string {
+	var out []string
+	seen := map[string]bool{}
+	for _, item := range in {
+		for _, p := range strings.Split(item, ",") {
+			p = strings.TrimSpace(p)
+			if p == "" || seen[p] {
+				continue
+			}
+			seen[p] = true
+			out = append(out, p)
+		}
+	}
+	return out
 }
 
 func parseEnv(envFiles []string, envVars []string) (map[string]string, error) {

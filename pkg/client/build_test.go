@@ -2325,7 +2325,7 @@ api = "0.2"
 						Buildpacks: []string{
 							"example.com/some/package",
 						},
-						Platform:   "linux/arm64",
+						Platforms:  []string{"linux/arm64"},
 						PullPolicy: image.PullAlways,
 					}))
 
@@ -2364,7 +2364,7 @@ api = "0.2"
 					h.AssertNil(t, subject.Build(context.TODO(), BuildOptions{
 						Image:      "some/app",
 						Builder:    defaultBuilderName,
-						Platform:   "linux/arm64",
+						Platforms:  []string{"linux/arm64"},
 						PullPolicy: image.PullAlways,
 					}))
 

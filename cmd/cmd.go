@@ -84,6 +84,7 @@ func NewPackCommand(logger ConfigurableLogger) (*cobra.Command, error) {
 	rootCmd.AddCommand(commands.NewStackCommand(logger))
 	rootCmd.AddCommand(commands.Rebase(logger, cfg, packClient))
 	rootCmd.AddCommand(commands.NewSBOMCommand(logger, cfg, packClient))
+	rootCmd.AddCommand(commands.NewImageMetadataCommand(logger))
 
 	rootCmd.AddCommand(commands.InspectBuildpack(logger, cfg, packClient))
 	rootCmd.AddCommand(commands.InspectBuilder(logger, cfg, packClient, builderwriter.NewFactory()))
