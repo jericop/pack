@@ -1103,6 +1103,28 @@ builder = "my-builder"
 			})
 		})
 
+		when("--pre-buildpack is provided", func() {
+			it("forwards the pre-buildpacks onto the client", func() {
+				mockClient.EXPECT().
+					Build(gomock.Any(), EqBuildOptionsWithPreBuildpacks([]string{"pre/one", "pre/two"})).
+					Return(nil)
+
+				command.SetArgs([]string{"image", "--builder", "my-builder", "--pre-buildpack", "pre/one", "--pre-buildpack", "pre/two"})
+				h.AssertNil(t, command.Execute())
+			})
+		})
+
+		when("--post-buildpack is provided", func() {
+			it("forwards the post-buildpacks onto the client", func() {
+				mockClient.EXPECT().
+					Build(gomock.Any(), EqBuildOptionsWithPostBuildpacks([]string{"post/one", "post/two"})).
+					Return(nil)
+
+				command.SetArgs([]string{"image", "--builder", "my-builder", "--post-buildpack", "post/one", "--post-buildpack", "post/two"})
+				h.AssertNil(t, command.Execute())
+			})
+		})
+
 		when("--insecure-registry is provided", func() {
 			it("sets one insecure registry", func() {
 				mockClient.EXPECT().
@@ -1393,6 +1415,24 @@ func EqBuildOptionsWithExecEnv(s string) interface{} {
 		description: fmt.Sprintf("exec-env=%s", s),
 		equals: func(o client.BuildOptions) bool {
 			return o.CNBExecutionEnv == s
+		},
+	}
+}
+
+func EqBuildOptionsWithPreBuildpacks(preBuildpacks []string) gomock.Matcher {
+	return buildOptionsMatcher{
+		description: fmt.Sprintf("PreBuildpacks=%s", preBuildpacks),
+		equals: func(o client.BuildOptions) bool {
+			return reflect.DeepEqual(o.PreBuildpacks, preBuildpacks)
+		},
+	}
+}
+
+func EqBuildOptionsWithPostBuildpacks(postBuildpacks []string) gomock.Matcher {
+	return buildOptionsMatcher{
+		description: fmt.Sprintf("PostBuildpacks=%s", postBuildpacks),
+		equals: func(o client.BuildOptions) bool {
+			return reflect.DeepEqual(o.PostBuildpacks, postBuildpacks)
 		},
 	}
 }
