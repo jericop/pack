@@ -108,12 +108,17 @@ func (b *BuildkitBackend) BuildMultiPlatform(ctx context.Context, platforms []Pl
 // A single bkClient.Build handles ALL platforms (the BuildFunc builds each and
 // returns per-platform refs).
 func (b *BuildkitBackend) driveNative(ctx context.Context, bkClient *client.Client, platforms []Platform, opts PlatformBuildOpts) ([]PlatformBuildResult, error) {
-	if !opts.Publish {
-		// MVP: the native path exports via BuildKit's image exporter with
-		// push=true. Non-publish (local daemon/OCI) output is a future addition;
-		// fail loudly rather than silently no-op.
-		return nil, fmt.Errorf("buildkit-native backend currently requires --publish (registry export)")
-	}
+	// Without --publish the build runs in VERIFY-ONLY mode: all platforms are built
+	// (so a per-commit CI gate proves the build works on every arch) but NO image is
+	// emitted anywhere — there is no registry push, no local-daemon load, and no OCI
+	// layout. The result stays in the BuildKit builder's content cache; a caller who
+	// wants the image can re-run with --publish (or extract it from the cache
+	// themselves). Because nothing is pushed, the finalize step is also skipped (there
+	// is no pushed manifest to author metadata onto), so a verify-only image is
+	// runnable-from-cache but not CNB-finalized.
+	//
+	// Rationale for not loading single-arch builds into the local Docker daemon here:
+	// kept out of scope for simplicity; see the RFC's open questions.
 
 	// App source as the build context local.
 	appFS, err := fsutil.NewFS(opts.AppPath)
@@ -238,12 +243,16 @@ func (b *BuildkitBackend) driveNative(ctx context.Context, bkClient *client.Clie
 		// --allow-insecure-entitlement network.host. (MVP; revisit for production
 		// network isolation.)
 		AllowedEntitlements: []string{string(entitlements.EntitlementNetworkHost)},
-		// BuildKit assembles + pushes the (multi-platform) image natively under
-		// the final name — one image/index, no intermediate tags.
-		Exports: []client.ExportEntry{{
+	}
+	// With --publish, BuildKit assembles + pushes the (multi-platform) image natively
+	// under the final name — one image/index, no intermediate tags. Without --publish
+	// (verify-only), no export entry is set: the build runs but emits nothing, leaving
+	// the result in the builder cache.
+	if opts.Publish {
+		solveOpt.Exports = []client.ExportEntry{{
 			Type:  client.ExporterImage,
 			Attrs: exporterImageAttrs(opts.ImageName, opts.AdditionalTags...),
-		}},
+		}}
 	}
 
 	// Empty progress prefix: each vertex name already carries a "[os/arch]" prefix
@@ -253,11 +262,28 @@ func (b *BuildkitBackend) driveNative(ctx context.Context, bkClient *client.Clie
 	// every streamed build line is attributable to an architecture in a
 	// multi-platform solve.
 	ch := b.startProgressDisplay("")
-	b.logger.Infof("Building %s via buildkit (%d platform(s))", opts.ImageName, len(platforms))
+	if opts.Publish {
+		b.logger.Infof("Building %s via buildkit (%d platform(s))", opts.ImageName, len(platforms))
+	} else {
+		b.logger.Infof("Building %s via buildkit (%d platform(s)) [verify-only: no --publish, image will not be emitted]", opts.ImageName, len(platforms))
+	}
 
 	// product="" -> default. nativeBuildFunc is pack's in-process gateway BuildFunc.
 	if _, err := bkClient.Build(ctx, solveOpt, "", makeNativeBuildFunc(in), ch); err != nil {
 		return nil, fmt.Errorf("buildkit-native build: %w", err)
+	}
+
+	// Verify-only (no --publish): nothing was pushed, so there is no image to finalize
+	// and no per-arch manifest to return references for. Report success — the build
+	// proved every platform builds — and return results pointing at the (unpushed)
+	// name for logging symmetry.
+	if !opts.Publish {
+		b.logger.Infof("Verify-only build succeeded for %d platform(s); no image emitted (re-run with --publish to push)", len(platforms))
+		results := make([]PlatformBuildResult, len(platforms))
+		for i, p := range platforms {
+			results[i] = PlatformBuildResult{Platform: p, ImageRef: opts.ImageName}
+		}
+		return results, nil
 	}
 
 	// Post-push FINALIZE (Option A): author the correct io.buildpacks.lifecycle.metadata
