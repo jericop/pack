@@ -1,0 +1,152 @@
+name: benchmark (perf smoke — daemon-single publish)
+
+# Single-cell smoke test used to confirm the docker-daemon-single build type
+# publishes correctly (build to the local daemon, then push to a registry) before
+# running the full benchmark-perf.yml matrix. Runs ONE app (default go/mod) in
+# docker-daemon-single mode with --publish, timing cold/rebuild/rebase exactly like
+# the real workflow's daemon-single cell. Manual only.
+
+on:
+  workflow_dispatch:
+    inputs:
+      app_name:
+        description: 'Sample app "<lang>/<app>" (paketo-buildpacks/samples layout)'
+        required: false
+        default: "go/mod"
+      pack_ref:
+        description: "pack fork git ref to build from"
+        required: false
+        default: "buildkit-native-export"
+      builder:
+        description: "Builder image"
+        required: false
+        default: "jericop/ubuntu-noble-builder:buildkit-native-export"
+      run_image:
+        description: "Run image"
+        required: false
+        default: "paketobuildpacks/ubuntu-noble-run:latest"
+      samples_repo:
+        description: "Samples repo (org/name), <lang>/<app> layout"
+        required: false
+        default: "paketo-buildpacks/samples"
+
+env:
+  PACK_REF: ${{ github.event.inputs.pack_ref || 'buildkit-native-export' }}
+  BUILDER: ${{ github.event.inputs.builder || 'jericop/ubuntu-noble-builder:buildkit-native-export' }}
+  RUN_IMAGE: ${{ github.event.inputs.run_image || 'paketobuildpacks/ubuntu-noble-run:latest' }}
+  SAMPLES_REPO: ${{ github.event.inputs.samples_repo || 'paketo-buildpacks/samples' }}
+  APP_NAME: ${{ github.event.inputs.app_name || 'go/mod' }}
+  HOST_PLATFORM: linux/amd64
+
+jobs:
+  smoke:
+    name: "daemon-single publish smoke (${{ github.event.inputs.app_name || 'go/mod' }})"
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout samples
+        uses: actions/checkout@v5
+        with:
+          repository: ${{ env.SAMPLES_REPO }}
+          path: samples
+
+      - name: Checkout pack source
+        uses: actions/checkout@v5
+        with:
+          repository: jericop/pack
+          ref: ${{ env.PACK_REF }}
+          path: pack-src
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: pack-src/go.mod
+
+      - name: Build pack from source
+        run: |
+          cd pack-src
+          go build -o "${GITHUB_WORKSPACE}/pack-bin" .
+
+      - name: pack version + experimental
+        run: |
+          chmod +x "${GITHUB_WORKSPACE}/pack-bin"
+          "${GITHUB_WORKSPACE}/pack-bin" version
+          "${GITHUB_WORKSPACE}/pack-bin" config experimental true
+
+      - name: Login to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKER_USERNAME }}
+          password: ${{ secrets.DOCKER_PASSWORD }}
+
+      - name: Warm up images (excluded from timings)
+        run: |
+          docker pull --platform "$HOST_PLATFORM" "$BUILDER" || true
+          docker pull --platform "$HOST_PLATFORM" "$RUN_IMAGE" || true
+
+      - name: Resolve build command
+        id: cmd
+        run: |
+          app_path="${GITHUB_WORKSPACE}/samples/${APP_NAME}"
+          if [ ! -d "$app_path" ]; then
+            echo "app path not found: $app_path" >&2
+            ls -1 "${GITHUB_WORKSPACE}/samples" >&2 || true
+            exit 1
+          fi
+          img="${{ secrets.DOCKERHUB_ORG }}/bench-daemon-smoke-${{ github.run_id }}:latest"
+          common="--path $app_path --builder $BUILDER --run-image $RUN_IMAGE --platform $HOST_PLATFORM --publish --trust-builder"
+          echo "img=$img" >> "$GITHUB_OUTPUT"
+          echo "common=$common" >> "$GITHUB_OUTPUT"
+
+      - name: "cold build"
+        id: cold
+        run: |
+          s=$(date +%s.%N)
+          "${GITHUB_WORKSPACE}/pack-bin" build "${{ steps.cmd.outputs.img }}" ${{ steps.cmd.outputs.common }}
+          e=$(date +%s.%N)
+          echo "seconds=$(awk -v s=$s -v e=$e 'BEGIN{printf "%.2f", e-s}')" >> "$GITHUB_OUTPUT"
+
+      - name: "rebuild (warm)"
+        id: rebuild
+        run: |
+          s=$(date +%s.%N)
+          "${GITHUB_WORKSPACE}/pack-bin" build "${{ steps.cmd.outputs.img }}" ${{ steps.cmd.outputs.common }}
+          e=$(date +%s.%N)
+          echo "seconds=$(awk -v s=$s -v e=$e 'BEGIN{printf "%.2f", e-s}')" >> "$GITHUB_OUTPUT"
+
+      - name: "rebase"
+        id: rebase
+        run: |
+          s=$(date +%s.%N)
+          "${GITHUB_WORKSPACE}/pack-bin" rebase "${{ steps.cmd.outputs.img }}" \
+            --run-image "$RUN_IMAGE" --publish
+          e=$(date +%s.%N)
+          echo "seconds=$(awk -v s=$s -v e=$e 'BEGIN{printf "%.2f", e-s}')" >> "$GITHUB_OUTPUT"
+
+      - name: Summary
+        if: ${{ always() }}
+        run: |
+          # Emit the SAME markdown table shape as benchmark-perf.yml's aggregate job, so
+          # results read identically whether you run the smoke (one cell) or the full
+          # matrix. Printed to the log as RAW MARKDOWN and to the job Summary tab.
+          {
+            echo "# Build performance — daemon-single publish smoke"
+            echo
+            echo "Single cell (\`docker-daemon-single\`, host-native \`${HOST_PLATFORM}\`, published)."
+            echo "Builder: \`${BUILDER}\`. Run image: \`${RUN_IMAGE}\`."
+            echo "Durations are wall-clock seconds."
+            echo
+            echo "| App | Build type | Cold (s) | Rebuild (s) | Rebase (s) |"
+            echo "|-----|------------|---------:|------------:|-----------:|"
+            echo "| \`${APP_NAME}\` | docker-daemon-single | ${{ steps.cold.outputs.seconds }} | ${{ steps.rebuild.outputs.seconds }} | ${{ steps.rebase.outputs.seconds }} |"
+          } | tee table.md
+          echo
+          echo "===== RAW MARKDOWN (copy below) ====="
+          cat table.md
+          cat table.md >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload table
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: benchmark-perf-smoke-table
+          path: table.md
