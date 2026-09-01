@@ -13,8 +13,15 @@ on:
         description: 'Sample app "<lang>/<app>" (paketo-buildpacks/samples layout)'
         required: false
         default: "go/mod"
+      pack_image:
+        description: >-
+          Optional: pull `pack` from this image and copy the binary out instead of
+          building from source (e.g. jericop/pack:buildkit-native-export). Use this to
+          validate a published pack image.
+        required: false
+        default: ""
       pack_ref:
-        description: "pack fork git ref to build from"
+        description: "pack fork git ref to build from when pack_image is empty"
         required: false
         default: "buildkit-native-export"
       builder:
@@ -31,6 +38,7 @@ on:
         default: "paketo-buildpacks/samples"
 
 env:
+  PACK_IMAGE: ${{ github.event.inputs.pack_image || '' }}
   PACK_REF: ${{ github.event.inputs.pack_ref || 'buildkit-native-export' }}
   BUILDER: ${{ github.event.inputs.builder || 'jericop/ubuntu-noble-builder:buildkit-native-export' }}
   RUN_IMAGE: ${{ github.event.inputs.run_image || 'paketobuildpacks/ubuntu-noble-run:latest' }}
@@ -50,6 +58,7 @@ jobs:
           path: samples
 
       - name: Checkout pack source
+        if: ${{ env.PACK_IMAGE == '' }}
         uses: actions/checkout@v5
         with:
           repository: jericop/pack
@@ -57,14 +66,24 @@ jobs:
           path: pack-src
 
       - name: Set up Go
+        if: ${{ env.PACK_IMAGE == '' }}
         uses: actions/setup-go@v5
         with:
           go-version-file: pack-src/go.mod
 
       - name: Build pack from source
+        if: ${{ env.PACK_IMAGE == '' }}
         run: |
           cd pack-src
           go build -o "${GITHUB_WORKSPACE}/pack-bin" .
+
+      - name: Copy pack out of image
+        if: ${{ env.PACK_IMAGE != '' }}
+        run: |
+          docker pull "${PACK_IMAGE}"
+          cid="$(docker create "${PACK_IMAGE}")"
+          docker cp "${cid}:/usr/local/bin/pack" "${GITHUB_WORKSPACE}/pack-bin"
+          docker rm "${cid}"
 
       - name: pack version + experimental
         run: |
