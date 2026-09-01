@@ -1,0 +1,109 @@
+name: publish-pack
+
+# Manual only. This workflow file lives on the fork's default branch (fork-main) so it
+# is dispatchable, but it BUILDS whatever `ref` you pass (a branch or tag of
+# jericop/pack) and derives the published image tag from that ref. This lets you
+# publish from a code branch (e.g. buildkit-native-export) that does NOT itself carry
+# this workflow file.
+#
+# This is the branch/ref-driven counterpart to publish-lifecycle.yml (cnb-lifecycle)
+# and publish-builder.yml (ubuntu-noble-builder), so all three forks publish the same
+# way: one manual workflow, image tag derived from the ref you build.
+#
+# The older TAG-DRIVEN pack pipeline (fork-release.yml -> delivery-docker.yml) is kept
+# for cutting formal, immutable semver releases with GitHub Release artifacts. Use this
+# workflow for quick, on-demand branch publishes during development.
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: "jericop/pack git ref to build + publish from (branch or tag). The image tag is derived from this."
+        required: false
+        default: "buildkit-native-export"
+      tag_latest:
+        description: "Also tag the built image as :latest (and :base for the base variant). Leave false for experimental fork builds."
+        required: false
+        type: boolean
+        default: false
+
+env:
+  REGISTRY_NAME: 'docker.io'
+  # Docker Hub org/user to publish under. Defaults to 'jericop' for this fork; upstream
+  # publishes to 'buildpacksio'.
+  DOCKERHUB_ORG: ${{ vars.DOCKERHUB_ORG || 'jericop' }}
+  IMG_NAME: 'pack'
+
+jobs:
+  publish:
+    strategy:
+      matrix:
+        config: [tiny, base]
+        include:
+          - config: tiny
+            base_image: gcr.io/distroless/static
+            suffix:
+          - config: base
+            base_image: ubuntu:jammy
+            suffix: -base
+    runs-on: ubuntu-latest
+    env:
+      REF: ${{ github.event.inputs.ref || 'buildkit-native-export' }}
+    steps:
+      # Check out the CODE to build from the requested ref (not fork-main, which only
+      # carries this workflow). fetch-depth 0 so make/version tooling can see history.
+      - name: Checkout source at ref
+        uses: actions/checkout@v4
+        with:
+          repository: jericop/pack
+          ref: ${{ env.REF }}
+          fetch-depth: 0
+      - name: Resolve image tag
+        id: tag
+        shell: bash
+        run: |
+          # Derive the image tag from the requested ref ($REF), matching the scheme
+          # used by publish-lifecycle.yml and publish-builder.yml:
+          #
+          # Semver-style tag ref (buildkit-native-export-v*): publish an immutable,
+          # pinned image whose tag matches the ref verbatim, e.g.
+          #   buildkit-native-export-v0.1.0 -> jericop/pack:buildkit-native-export-v0.1.0
+          #
+          # Branch ref: publish a moving per-branch tag named after the ref, e.g.
+          #   buildkit-native-export -> jericop/pack:buildkit-native-export
+          #
+          # Both cases publish the ref verbatim as the tag, so no transformation is
+          # needed here (unlike the old delivery-docker.yml, which stripped a leading
+          # `v` from classic v<semver> tags).
+          IMAGE_TAG="${REF}"
+          echo "image_tag=${IMAGE_TAG}" >> "$GITHUB_OUTPUT"
+          echo "Resolved image tag: ${IMAGE_TAG} (from ref ${REF})"
+      - name: Determine image name
+        run: 'echo "IMG_NAME=${{ env.REGISTRY_NAME }}/${{ env.DOCKERHUB_ORG }}/${{ env.IMG_NAME }}" >> $GITHUB_ENV'
+      - name: Login to Dockerhub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKER_USERNAME }}
+          password: ${{ secrets.DOCKER_PASSWORD }}
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+      - uses: buildpacks/github-actions/setup-tools@v5.9.4
+      - name: Buildx Build/Publish
+        run: |
+          # Build pack from the checked-out source (the Dockerfile does `make build`),
+          # for the platforms we test on (amd64 + arm64). pack_version is baked in as a
+          # label/version string; a branch name is fine here.
+          docker buildx build . \
+            --tag ${{ env.IMG_NAME }}:${{ steps.tag.outputs.image_tag }}${{ matrix.suffix }} \
+            --platform linux/amd64,linux/arm64 \
+            --build-arg pack_version=${{ steps.tag.outputs.image_tag }} \
+            --build-arg base_image=${{ matrix.base_image }} \
+            --provenance=false \
+            --push
+      - name: Tag Image as Base
+        if: ${{ github.event.inputs.tag_latest == 'true' && matrix.config == 'base' }}
+        run: |
+          crane copy ${{ env.IMG_NAME }}:${{ steps.tag.outputs.image_tag }}${{ matrix.suffix }} ${{ env.IMG_NAME }}:base
+      - name: Tag Image as Latest
+        if: ${{ github.event.inputs.tag_latest == 'true' && matrix.config != 'base' }}
+        run: |
+          crane copy ${{ env.IMG_NAME }}:${{ steps.tag.outputs.image_tag }}${{ matrix.suffix }} ${{ env.IMG_NAME }}:latest
