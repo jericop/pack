@@ -125,8 +125,28 @@ jobs:
       - name: Summary
         if: ${{ always() }}
         run: |
+          # Emit the SAME markdown table shape as benchmark-perf.yml's aggregate job, so
+          # results read identically whether you run the smoke (one cell) or the full
+          # matrix. Printed to the log as RAW MARKDOWN and to the job Summary tab.
           {
-            echo "## daemon-single publish smoke: \`${APP_NAME}\`"
-            echo "image: \`${{ steps.cmd.outputs.img }}\`"
-            echo "cold=${{ steps.cold.outputs.seconds }}s rebuild=${{ steps.rebuild.outputs.seconds }}s rebase=${{ steps.rebase.outputs.seconds }}s"
-          } | tee "$GITHUB_STEP_SUMMARY"
+            echo "# Build performance — daemon-single publish smoke"
+            echo
+            echo "Single cell (\`docker-daemon-single\`, host-native \`${HOST_PLATFORM}\`, published)."
+            echo "Builder: \`${BUILDER}\`. Run image: \`${RUN_IMAGE}\`."
+            echo "Durations are wall-clock seconds."
+            echo
+            echo "| App | Build type | Cold (s) | Rebuild (s) | Rebase (s) |"
+            echo "|-----|------------|---------:|------------:|-----------:|"
+            echo "| \`${APP_NAME}\` | docker-daemon-single | ${{ steps.cold.outputs.seconds }} | ${{ steps.rebuild.outputs.seconds }} | ${{ steps.rebase.outputs.seconds }} |"
+          } | tee table.md
+          echo
+          echo "===== RAW MARKDOWN (copy below) ====="
+          cat table.md
+          cat table.md >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload table
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: benchmark-perf-smoke-table
+          path: table.md
