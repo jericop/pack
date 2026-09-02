@@ -999,38 +999,38 @@ func (c *Client) buildMultiPlatform(ctx context.Context, opts BuildOptions, life
 
 	// Build the platform options (shared across all architectures)
 	platformBuildOpts := multiplatform.PlatformBuildOpts{
-		BuilderImage:     lifecycleOpts.BuilderImage,
-		LifecycleImage:   lifecycleOpts.LifecycleImage,
-		RunImage:         runImageName,
-		AppPath:          appPath,
-		Phases:           phases,
-		CacheID:          cacheID,
-		BuildID:          buildID,
-		ImageName:        lifecycleOpts.Image.Name(),
-		Publish:          opts.Publish,
-		DockerConfigPath: dockerConfigPath,
-		BuilderUID:       lifecycleOpts.Builder.UID(),
-		BuilderGID:       lifecycleOpts.Builder.GID(),
-		PlatformAPI:      negotiatePlatformAPI(lifecycleOpts),
-		FileFilter:       lifecycleOpts.FileFilter,
-		Network:          opts.ContainerConfig.Network,
+		BuilderImage:       lifecycleOpts.BuilderImage,
+		LifecycleImage:     lifecycleOpts.LifecycleImage,
+		RunImage:           runImageName,
+		AppPath:            appPath,
+		Phases:             phases,
+		CacheID:            cacheID,
+		BuildID:            buildID,
+		ImageName:          lifecycleOpts.Image.Name(),
+		Publish:            opts.Publish,
+		DockerConfigPath:   dockerConfigPath,
+		BuilderUID:         lifecycleOpts.Builder.UID(),
+		BuilderGID:         lifecycleOpts.Builder.GID(),
+		PlatformAPI:        negotiatePlatformAPI(lifecycleOpts),
+		FileFilter:         lifecycleOpts.FileFilter,
+		Network:            opts.ContainerConfig.Network,
 		ExtraBuildpacksDir: extraBuildpacksDir,
 		OrderToml:          orderToml,
-		ClearCache:       opts.ClearCache,
-		RegistryAuth:     buildRegistryAuth(c.keychain, lifecycleOpts),
+		ClearCache:         opts.ClearCache,
+		RegistryAuth:       buildRegistryAuth(c.keychain, lifecycleOpts),
 		// Advertise the builder's stack id + OS distro to the lifecycle/buildpacks so
 		// buildpack dependency resolution can pick stack/target-specific PREBUILT
 		// dependencies instead of compiling from source (see native_buildfunc env).
-		StackID:             builderImageLabel(lifecycleOpts.Builder.Image(), "io.buildpacks.stack.id"),
-		TargetDistroName:    builderDistroLabel(lifecycleOpts.Builder.Image(), "name"),
-		TargetDistroVersion: builderDistroLabel(lifecycleOpts.Builder.Image(), "version"),
-		BuildEnv:            buildEnvs,
-		ExperimentalMode:    experimentalMode,
-		SourceDateEpoch:     sourceDateEpoch,
-		HTTPProxy:           proxyConfig.HTTPProxy,
-		HTTPSProxy:          proxyConfig.HTTPSProxy,
-		NoProxy:             proxyConfig.NoProxy,
-		Keychain:            c.keychain,
+		StackID:              builderImageLabel(lifecycleOpts.Builder.Image(), "io.buildpacks.stack.id"),
+		TargetDistroName:     builderDistroLabel(lifecycleOpts.Builder.Image(), "name"),
+		TargetDistroVersion:  builderDistroLabel(lifecycleOpts.Builder.Image(), "version"),
+		BuildEnv:             buildEnvs,
+		ExperimentalMode:     experimentalMode,
+		SourceDateEpoch:      sourceDateEpoch,
+		HTTPProxy:            proxyConfig.HTTPProxy,
+		HTTPSProxy:           proxyConfig.HTTPSProxy,
+		NoProxy:              proxyConfig.NoProxy,
+		Keychain:             c.keychain,
 		DefaultProcessType:   opts.DefaultProcessType,
 		AdditionalTags:       opts.AdditionalTags,
 		SBOMDestinationDir:   opts.SBOMDestinationDir,
@@ -2246,7 +2246,13 @@ func (c *Client) createEphemeralBuilder(
 	}
 
 	origBuilderName := rawBuilderImage.Name()
-	bldr, err := builder.New(rawBuilderImage, fmt.Sprintf("pack.local/builder/%x:latest", randString(10)), builder.WithRunImage(runImage))
+	// Flatten all added modules into a single image layer. The ephemeral builder is
+	// synthesized on TOP of the (already-deep) base builder image, so adding one
+	// image layer per extra buildpack module can push the image past the daemon's
+	// layer-depth cap ("max depth exceeded") before any lifecycle phase runs.
+	// Flattening keeps the added modules to O(1) layers regardless of how many are
+	// added. See FR-7 (PLATFORM-1662 follow-ups).
+	bldr, err := builder.New(rawBuilderImage, fmt.Sprintf("pack.local/builder/%x:latest", randString(10)), builder.WithRunImage(runImage), builder.WithFlattenAllModules())
 	if err != nil {
 		return nil, errors.Wrapf(err, "invalid builder %s", style.Symbol(origBuilderName))
 	}
