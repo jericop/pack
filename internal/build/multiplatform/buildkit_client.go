@@ -31,10 +31,31 @@ func (b *BuildkitBackend) connectToBuildkit(ctx context.Context) (*client.Client
 
 // resolveBuildkitAddr determines the buildkit daemon address for the configured
 // docker-container driver builder, connecting via the docker-container:// scheme.
+//
+// When --buildkit-builder is empty, it resolves the ACTUAL current buildx builder
+// from buildx's on-disk state (not a hard-coded name) and validates that its driver
+// can serve a multi-platform buildkit build. If the current builder is the plain
+// "docker" driver (which cannot), it returns an actionable error telling the user to
+// create/select a docker-container (or remote) builder — instead of silently
+// assuming a "pack-multiplatform" builder exists.
 func (b *BuildkitBackend) resolveBuildkitAddr(ctx context.Context) (string, error) {
 	builderName := b.buildkitOpts.Builder
 	if builderName == "" {
-		builderName = "pack-multiplatform"
+		resolved, err := resolveCurrentBuildxBuilder()
+		if err != nil {
+			return "", fmt.Errorf("resolving current buildx builder (pass --buildkit-builder to select one explicitly): %w", err)
+		}
+		if !driverSupportsMultiPlatform(resolved.Driver) {
+			return "", fmt.Errorf(
+				"the current buildx builder uses the %q driver, which cannot serve multi-platform buildkit builds; "+
+					"create and select a docker-container builder, e.g.:\n"+
+					"    docker buildx create --driver docker-container --name pack-multiplatform --use\n"+
+					"    docker buildx inspect --bootstrap pack-multiplatform\n"+
+					"then re-run, or pass --buildkit-builder <name> to use an existing one",
+				resolved.Driver)
+		}
+		builderName = resolved.Name
+		b.logger.Debugf("Resolved current buildx builder %q (driver %s)", builderName, resolved.Driver)
 	}
 	containerName := fmt.Sprintf("buildx_buildkit_%s0", builderName)
 

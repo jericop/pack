@@ -535,12 +535,25 @@ func buildEmitLLB(in nativeBuildInputs, p ocispecs.Platform) llb.State {
 			keys = append(keys, k)
 		}
 		sort.Strings(keys)
+		// Chain every env-file write into a SINGLE FileAction so the whole thing is
+		// ONE progress vertex ("[plat] write platform env (N vars)") instead of one
+		// vertex per variable. A CI caller passing a large env-file (e.g. Jenkins
+		// forwarding its whole environment) would otherwise flood the progress output
+		// with dozens of vertices per platform and bury the lifecycle steps. Keys are
+		// sorted first so the chained op is deterministic and LLB stays cache-stable.
+		var envAction *llb.FileAction
 		for _, k := range keys {
-			base = base.File(
-				llb.Mkfile(path.Join("/platform/env", k), 0644, []byte(in.buildEnv[k])),
-				llb.WithCustomNamef("[%s] platform env: %s", plat, k),
-			)
+			p := path.Join("/platform/env", k)
+			if envAction == nil {
+				envAction = llb.Mkfile(p, 0644, []byte(in.buildEnv[k]))
+			} else {
+				envAction = envAction.Mkfile(p, 0644, []byte(in.buildEnv[k]))
+			}
 		}
+		base = base.File(
+			envAction,
+			llb.WithCustomNamef("[%s] write platform env (%d vars)", plat, len(keys)),
+		)
 	}
 
 	appSrc := llb.Local(contextLocalName)
