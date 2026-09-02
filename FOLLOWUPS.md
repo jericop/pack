@@ -22,6 +22,29 @@ Severity legend:
 
 Details per item below, annotated with what changed.
 
+### Validation (2026-09)
+
+- **Local** (fork `pack` built from source, `pd-sample-python-app` — the nested
+  `src/<pkg>/` + `project.toml` include-filter repro):
+  - #1: with no `--buildkit-builder` and the macOS default `desktop-linux` (docker
+    driver) selected, the build now fails with the actionable docker-container error
+    (not the old cryptic `buildx_buildkit_pack-multiplatform0 not found`).
+  - #2: the multi-arch build gets PAST `copy app source` into the lifecycle phases with
+    NO "changes out of order" — the fsutil ordering failure is gone.
+  - #4: progress shows a single `write platform env (N vars)` vertex.
+  - (See `local-registry-testing.md` for the registry-networking setup; use
+    `pack-local-registry:5000` + `PACK_HOST_REGISTRY_REMAP`, not `localhost:5050`.)
+- **CI** (`benchmark-dockerfile-vs-buildpacks.yml` built from the fix branch): all 12
+  cells succeeded, including all three `python-poetry` cells via the buildkit backend;
+  the `benchmark-perf-smoke.yml` run also succeeded.
+
+> NOTE: `pd-sample-python-app` currently has a STALE `poetry.lock` (out of sync with its
+> `pyproject.toml`), so a full local build of THAT fixture fails in the Poetry buildpack
+> (`pyproject.toml changed significantly since poetry.lock was last generated`). That is
+> an app-fixture problem, unrelated to these fixes — the build reaches dependency
+> install, well past the app-context sync that #2 addresses. CI uses
+> `paketo-buildpacks/samples` (clean lockfile) and builds green.
+
 ---
 
 ## 1. [FIXED] Empty `--buildkit-builder` resolves to a non-existent `pack-multiplatform` builder
