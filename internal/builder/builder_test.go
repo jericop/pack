@@ -2004,6 +2004,79 @@ func testBuilder(t *testing.T, when spec.G, it spec.S) {
 				})
 			})
 		})
+
+		// AC-2 (PLATFORM-1662 / FR-7): the synthesized/ephemeral builder pack creates
+		// when extra buildpacks are added to a trusted builder MUST add a flattened
+		// (single) image layer for N extra modules, not one layer per module. Adding
+		// one layer per module on top of an already-deep base builder is what pushed
+		// the image past the daemon layer-depth cap ("max depth exceeded"). This
+		// exercises builder.WithFlattenAllModules() (used by createEphemeralBuilder)
+		// and asserts the O(1)-layers invariant.
+		when("all modules are flattened (WithFlattenAllModules)", func() {
+			var fakeLayerImage *h.FakeAddedLayerImage
+
+			it.Before(func() {
+				var err error
+				fakeLayerImage = &h.FakeAddedLayerImage{Image: baseImage}
+				bldr, err = builder.New(fakeLayerImage, "some-builder", builder.WithFlattenAllModules())
+				h.AssertNil(t, err)
+				bldr.SetLifecycle(mockLifecycle)
+			})
+
+			when("#FlattenedModules", func() {
+				it("returns a single group containing all added modules", func() {
+					bldr.AddBuildpacks(bp1v1, deps) // bp1v1 + bp2v1 + bp1v2 => 3 modules
+					h.AssertEq(t, len(bldr.FlattenedModules(buildpack.KindBuildpack)), 1)
+					h.AssertEq(t, len(bldr.FlattenedModules(buildpack.KindBuildpack)[0]), 3)
+				})
+			})
+
+			when("#ShouldFlatten", func() {
+				it("returns true for each added module", func() {
+					bldr.AddBuildpacks(bp1v1, deps)
+					h.AssertTrue(t, bldr.ShouldFlatten(bp1v1))
+					h.AssertTrue(t, bldr.ShouldFlatten(bp2v1))
+					h.AssertTrue(t, bldr.ShouldFlatten(bp1v2))
+				})
+			})
+
+			it("adds a single (flattened) buildpack layer for N modules, not one per module", func() {
+				// Add 3 distinct buildpack modules.
+				bldr.AddBuildpacks(bp1v1, deps)
+
+				h.AssertNil(t, bldr.Save(logger, builder.CreatorMetadata{}))
+				h.AssertEq(t, baseImage.IsSaved(), true)
+
+				// Every module layer is added via AddLayerWithDiffID, which the fake
+				// records. With flattening, the 3 modules collapse into exactly ONE
+				// layer (O(1)); without it we would see 3 (O(N)).
+				addedModuleLayers := fakeLayerImage.AddedLayersOrder()
+				h.AssertEq(t, len(addedModuleLayers), 1)
+			})
+
+			it("keeps added-module layers at O(1) as N grows", func() {
+				// Two distinct modules...
+				fakeLayerImage2 := &h.FakeAddedLayerImage{Image: baseImage}
+				bldr2, err := builder.New(fakeLayerImage2, "some-builder", builder.WithFlattenAllModules())
+				h.AssertNil(t, err)
+				bldr2.SetLifecycle(mockLifecycle)
+				bldr2.AddBuildpacks(bp1v1, []buildpack.BuildModule{bp1v2})
+				h.AssertNil(t, bldr2.Save(logger, builder.CreatorMetadata{}))
+				twoModuleLayers := len(fakeLayerImage2.AddedLayersOrder())
+
+				// ...vs three distinct modules: the added-module layer count must not grow.
+				fakeLayerImage3 := &h.FakeAddedLayerImage{Image: baseImage}
+				bldr3, err := builder.New(fakeLayerImage3, "some-builder", builder.WithFlattenAllModules())
+				h.AssertNil(t, err)
+				bldr3.SetLifecycle(mockLifecycle)
+				bldr3.AddBuildpacks(bp1v1, deps)
+				h.AssertNil(t, bldr3.Save(logger, builder.CreatorMetadata{}))
+				threeModuleLayers := len(fakeLayerImage3.AddedLayersOrder())
+
+				h.AssertEq(t, twoModuleLayers, 1)
+				h.AssertEq(t, threeModuleLayers, 1)
+			})
+		})
 	})
 
 	when("labels", func() {

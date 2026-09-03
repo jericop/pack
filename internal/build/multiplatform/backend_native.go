@@ -190,9 +190,10 @@ func (b *BuildkitBackend) driveNative(ctx context.Context, bkClient *client.Clie
 		sbomDestDir:         opts.SBOMDestinationDir,
 		reportDestDir:       opts.ReportDestinationDir,
 		bindings:            opts.Bindings,
-		workspace:           workspace,
-		execEnv:             opts.ExecutionEnv,
-		hasExtraBuildpacks:  opts.ExtraBuildpacksDir != "",
+		workspace:            workspace,
+		execEnv:              opts.ExecutionEnv,
+		extraBuildpackImages: opts.ExtraBuildpackImages,
+		hasAgnosticBuildpacks: opts.ExtraBuildpacksDir != "",
 	}
 	if reg := registryHost(opts.ImageName); reg != "" && isLikelyInsecureRegistry(reg) {
 		in.insecureRegistries = []string{reg}
@@ -213,13 +214,14 @@ func (b *BuildkitBackend) driveNative(ctx context.Context, bkClient *client.Clie
 		}
 		localMounts[bindingLocalName(b.Name)] = bindFS
 	}
-	// Extra buildpack modules (--buildpack / --pre-buildpack / --post-buildpack):
-	// synced in as one local and copied over the builder's /cnb/buildpacks (see
-	// buildEmitLLB). Present only when the user supplied additional buildpacks.
+	// Multi-arch extra buildpacks are pulled per-platform as registry images directly in
+	// LLB (see buildEmitLLB) — no host-side local mount. PLATFORM-AGNOSTIC extra
+	// buildpacks (inline/local/single-manifest) are staged host-side and synced in as one
+	// local, copied to every leg.
 	if opts.ExtraBuildpacksDir != "" {
 		bpFS, ferr := fsutil.NewFS(opts.ExtraBuildpacksDir)
 		if ferr != nil {
-			return nil, fmt.Errorf("creating local FS for extra buildpacks dir %s: %w", opts.ExtraBuildpacksDir, ferr)
+			return nil, fmt.Errorf("creating local FS for agnostic extra buildpacks dir %s: %w", opts.ExtraBuildpacksDir, ferr)
 		}
 		localMounts[extraBuildpacksLocalName] = bpFS
 	}

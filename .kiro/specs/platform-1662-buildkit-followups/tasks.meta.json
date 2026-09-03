@@ -1,0 +1,38 @@
+{
+  "pbtResults": {},
+  "executionHistory": {
+    "Reproduce: `pack build --build-backend buildkit --builder <deep noble builder>": [
+      {
+        "executionId": "4be2ba24-7a79-46c2-9e9f-3d5f769e541d",
+        "chatSessionId": "sess_a4f76177-8d17-47de-9a65-381648fdbd3d",
+        "timestamp": 1788362929407
+      },
+      {
+        "executionId": "6c412822-823f-4c67-84e0-e892b32d2ab9",
+        "chatSessionId": "sess_a4f76177-8d17-47de-9a65-381648fdbd3d",
+        "timestamp": 1788368783182
+      }
+    ],
+    "Implement the flatten: route the ADDED builder modules through the flattened path": [
+      {
+        "executionId": "6c412822-823f-4c67-84e0-e892b32d2ab9",
+        "chatSessionId": "sess_a4f76177-8d17-47de-9a65-381648fdbd3d",
+        "timestamp": 1788368800818
+      }
+    ],
+    "Enforce the invariant: N extra modules add O(1) builder image layers, not O(N); the": [
+      {
+        "executionId": "6c412822-823f-4c67-84e0-e892b32d2ab9",
+        "chatSessionId": "sess_a4f76177-8d17-47de-9a65-381648fdbd3d",
+        "timestamp": 1788368804856
+      }
+    ],
+    "AC-1: the repro command completes without `max depth exceeded` and produces the": [
+      {
+        "executionId": "6c412822-823f-4c67-84e0-e892b32d2ab9",
+        "chatSessionId": "sess_a4f76177-8d17-47de-9a65-381648fdbd3d",
+        "timestamp": 1788368809333
+      }
+    ]
+  }
+}

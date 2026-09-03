@@ -97,11 +97,11 @@ already resolved, etc.).
 3. Compare the two logs and durations to see how caching behaves (which vertices
    are `CACHED`, whether the builder/run image is re-pulled, total wall time).
 
-Save logs and timing under `/tmp/kiro-command-logs/` (see the command-output
+Save logs and timing under `~/tmp/kiro-command-logs/` (see the command-output
 logging steering). Include duration in each log. Example pattern:
 
 ```bash
-mkdir -p /tmp/kiro-command-logs
+mkdir -p ~/tmp/kiro-command-logs
 build_cmd() {
   /tmp/pack-poc build localhost:5050/no-imports:multiarch \
     --path /Users/jpena/.repos/paketo-buildpacks/samples/go/no-imports \
@@ -114,11 +114,11 @@ build_cmd() {
 }
 
 # Cold build
-log1=/tmp/kiro-command-logs/pack-build-initial-$(date +%Y%m%d-%H%M%S).log
+log1=~/tmp/kiro-command-logs/pack-build-initial-$(date +%Y%m%d-%H%M%S).log
 { echo "START: $(date -u +%FT%TZ)"; time build_cmd; echo "END: $(date -u +%FT%TZ)"; } 2>&1 | tee "$log1"
 
 # Warm rebuild (identical command)
-log2=/tmp/kiro-command-logs/pack-build-rebuild-$(date +%Y%m%d-%H%M%S).log
+log2=~/tmp/kiro-command-logs/pack-build-rebuild-$(date +%Y%m%d-%H%M%S).log
 { echo "START: $(date -u +%FT%TZ)"; time build_cmd; echo "END: $(date -u +%FT%TZ)"; } 2>&1 | tee "$log2"
 ```
 
@@ -141,7 +141,7 @@ binary (the workspace app). Check each per-arch image:
 - A build that pushes an image whose single layer is a tarball of `/output` (an
   OCI layout tree) is WRONG — that is the wrapper bug, not a runnable image.
 
-Save the verification output to `/tmp/kiro-command-logs/`.
+Save the verification output to `~/tmp/kiro-command-logs/`.
 
 ## On errors: iterate, then resume
 

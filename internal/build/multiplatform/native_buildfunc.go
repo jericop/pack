@@ -14,6 +14,8 @@ import (
 
 	"github.com/BurntSushi/toml"
 	ggcrname "github.com/google/go-containerregistry/pkg/name"
+	v1 "github.com/google/go-containerregistry/pkg/v1"
+	"github.com/google/go-containerregistry/pkg/v1/remote"
 	"github.com/moby/buildkit/client/llb"
 	"github.com/moby/buildkit/client/llb/sourceresolver"
 	"github.com/moby/buildkit/exporter/containerimage/exptypes"
@@ -103,13 +105,18 @@ type nativeBuildInputs struct {
 	// default /workspace. The app source is copied here and every phase runs with
 	// -app <workspace>.
 	workspace string
-	// hasExtraBuildpacks indicates the user supplied additional buildpack modules
-	// (--buildpack / --pre-buildpack / --post-buildpack). When true, buildEmitLLB
-	// syncs the staged modules (llb.Local(extraBuildpacksLocalName), a tree rooted at
-	// /cnb/buildpacks/...) and copies them over the builder's /cnb/buildpacks before
-	// detect, so added buildpacks participate and same-id/version modules override the
-	// builder's copy. The staging dir is provided by the backend as a local mount.
-	hasExtraBuildpacks bool
+	// extraBuildpackImages are the registry image refs of user-supplied MULTI-ARCH extra
+	// buildpacks (--buildpack / project.toml), each supporting every requested platform
+	// (pack verified this). For each platform leg, buildEmitLLB pulls each buildpack's
+	// PER-PLATFORM child image and COPYs its /cnb/buildpacks over the builder's before
+	// detect — so every arch gets its OWN arch-matching buildpack binaries
+	// (PLATFORM-1662 FR-8b) and same-id/version modules override the builder's copy.
+	extraBuildpackImages []string
+	// hasAgnosticBuildpacks indicates the backend staged PLATFORM-AGNOSTIC extra
+	// buildpacks (inline scripts, local dir/tarball, urn:cnb:registry, single-manifest
+	// images) as a single local (extraBuildpacksLocalName). When true, buildEmitLLB
+	// copies that same arch-neutral tree over /cnb/buildpacks on EVERY platform leg.
+	hasAgnosticBuildpacks bool
 	// execEnv is the CNB execution environment (pack --exec-env, e.g. production/
 	// test/development). Passed as CNB_EXEC_ENV when the platform API is >= 0.15.
 	execEnv string
@@ -180,7 +187,36 @@ func makeNativeBuildFunc(in nativeBuildInputs) client.BuildFunc {
 // build-metadata, assemble FROM run-image via llb.Copy from sources, and return the
 // assembled ref + the marshaled image config (runtime config + build-metadata label).
 func nativeBuildPlatform(ctx context.Context, c client.Client, in nativeBuildInputs, p ocispecs.Platform) (client.Reference, []byte, error) {
-	built := buildEmitLLB(in, p)
+	// Resolve the base builder (and the emit-capable lifecycle image, when overlaid)
+	// to their PER-PLATFORM digest-pinned refs. Without this, llb.Image(tag,
+	// Platform(p)) resolves the tag once to the daemon's default arch, so every
+	// platform leg would run the SAME arch's builder — e.g. the arm64 leg executing
+	// amd64 buildpack binaries, which then fetch amd64 dependencies (wrong-arch
+	// python3 -> SIGTRAP/ENOENT). PLATFORM-1662 FR-8b.
+	builderRef, err := resolvePlatformRefNBF(ctx, c, in.builderImage, p)
+	if err != nil {
+		return nil, nil, err
+	}
+	lifecycleRef := in.lifecycleImage
+	if lifecycleRef != "" {
+		lifecycleRef, err = resolvePlatformRefNBF(ctx, c, in.lifecycleImage, p)
+		if err != nil {
+			return nil, nil, err
+		}
+	}
+	// Resolve each extra buildpack image to its PER-PLATFORM child digest so this leg
+	// copies in the arch-matching buildpack binaries (FR-8b). pack has already verified
+	// each supports platform p.
+	var extraBuildpackRefs []string
+	for _, bpImg := range in.extraBuildpackImages {
+		bpRef, rerr := resolvePlatformRefNBF(ctx, c, bpImg, p)
+		if rerr != nil {
+			return nil, nil, rerr
+		}
+		extraBuildpackRefs = append(extraBuildpackRefs, bpRef)
+	}
+
+	built := buildEmitLLB(in, p, builderRef, lifecycleRef, extraBuildpackRefs)
 	builtRef, err := solveLLB(ctx, c, built, p)
 	if err != nil {
 		return nil, nil, errors.Wrap(err, "solve emit graph")
@@ -413,6 +449,51 @@ func resolveImageConfigNBF(ctx context.Context, c client.Client, ref string, p o
 	return &img, nil
 }
 
+// resolvePlatformRefNBF resolves an image reference (a tag or digest) to the
+// PER-PLATFORM digest-pinned reference for platform p. This is REQUIRED for the base
+// builder + lifecycle images: llb.Image(tag, llb.Platform(p)) alone does NOT reliably
+// select the per-arch manifest — the gateway resolves the tag once to the daemon's
+// default platform, so a multi-arch build would run the SAME arch's builder (and thus
+// the wrong-arch buildpack binaries) on every platform leg. Resolving the config with
+// an explicit Platform yields a ref pinned to that platform's manifest digest, which
+// we then hand to llb.Image so each leg truly uses its own architecture. (The run image
+// already gets this treatment via the analyzer-pinned digest in analyzed.toml — see
+// resolvedRunImageRefNBF.) PLATFORM-1662 FR-8b.
+func resolvePlatformRefNBF(ctx context.Context, c client.Client, ref string, p ocispecs.Platform) (string, error) {
+	// Resolve to the PER-PLATFORM CHILD MANIFEST digest and pin llb.Image to
+	// name@<child-digest>. This is the only unambiguous way to make each platform leg
+	// use its own architecture: passing a tag OR a manifest-LIST/index digest to
+	// llb.Image leaves platform selection to the gateway, which (FR-8b) resolves it to
+	// a single arch (the daemon default) and reuses that for every leg — so the arm64
+	// leg ends up running amd64 builder/buildpack binaries. A single-arch child digest
+	// has nothing to (mis)select. We resolve the child via go-containerregistry (the
+	// same library the run-image finalize path uses); for a Docker Hub image the digests
+	// the host sees are identical to what the builder pulls.
+	named, err := ggcrname.ParseReference(ref, ggcrname.WeakValidation)
+	if err != nil {
+		return "", errors.Wrapf(err, "parsing ref %s", ref)
+	}
+	plat := v1.Platform{OS: p.OS, Architecture: p.Architecture, Variant: p.Variant}
+	desc, err := remote.Get(named, remote.WithContext(ctx), remote.WithPlatform(plat))
+	if err != nil {
+		return "", errors.Wrapf(err, "resolving %s for %s/%s", ref, p.OS, p.Architecture)
+	}
+	// remote.Get returns the TOP-LEVEL descriptor — for a manifest LIST that is the
+	// index digest, not the per-platform child. Calling desc.Image() applies the
+	// WithPlatform option to select the child image; its Digest() is the child manifest
+	// digest we want to pin. (For an already single-arch ref, Image() returns that image
+	// and Digest() is its own digest.)
+	img, err := desc.Image()
+	if err != nil {
+		return "", errors.Wrapf(err, "selecting %s/%s image from %s", p.OS, p.Architecture, ref)
+	}
+	childDigest, err := img.Digest()
+	if err != nil {
+		return "", errors.Wrapf(err, "digest of %s/%s image from %s", p.OS, p.Architecture, ref)
+	}
+	return named.Context().Name() + "@" + childDigest.String(), nil
+}
+
 func solveLLB(ctx context.Context, c client.Client, st llb.State, p ocispecs.Platform) (client.Reference, error) {
 	def, err := st.Marshal(ctx, llb.Platform(p))
 	if err != nil {
@@ -468,12 +549,17 @@ func platformLabel(p ocispecs.Platform) string {
 	return s
 }
 
-func buildEmitLLB(in nativeBuildInputs, p ocispecs.Platform) llb.State {
-	base := llb.Image(in.builderImage, llb.Platform(p))
+// buildEmitLLB builds the emit-graph LLB for one platform. builderRef and lifecycleRef
+// are the PER-PLATFORM digest-pinned image refs resolved by the caller (see
+// resolvePlatformRefNBF); using them — instead of the raw tag in in.builderImage /
+// in.lifecycleImage — guarantees each platform leg runs its OWN architecture's builder
+// and lifecycle binaries (PLATFORM-1662 FR-8b).
+func buildEmitLLB(in nativeBuildInputs, p ocispecs.Platform, builderRef, lifecycleRef string, extraBuildpackRefs []string) llb.State {
+	base := llb.Image(builderRef, llb.Platform(p))
 	plat := platformLabel(p) // e.g. "linux/arm64" — prefixed onto every vertex name below
 
-	if in.lifecycleImage != "" {
-		lc := llb.Image(in.lifecycleImage, llb.Platform(p))
+	if lifecycleRef != "" {
+		lc := llb.Image(lifecycleRef, llb.Platform(p))
 		base = base.Run(
 			llb.Args([]string{"/bin/sh", "-c", "rm -rf /cnb/lifecycle"}),
 			llb.WithCustomNamef("[%s] remove existing lifecycle", plat),
@@ -498,28 +584,47 @@ func buildEmitLLB(in nativeBuildInputs, p ocispecs.Platform) llb.State {
 		).Root()
 	}
 
-	// Extra buildpack modules (--buildpack / --pre-buildpack / --post-buildpack):
-	// the staged tree is rooted at /cnb/buildpacks/... so copying it over the
-	// builder's /cnb/buildpacks adds new modules and OVERRIDES same-id/version ones
-	// (the "test a local buildpack change" use case). This runs before detect, and
-	// only mutates the transient builder state — the final image is assembled FROM
-	// the run image, so these modules never enter the output. Copying (vs mounting)
-	// is intentional: the modules must persist through the detect/build RUNs.
-	if in.hasExtraBuildpacks {
-		bpSrc := llb.Local(extraBuildpacksLocalName)
+	// PLATFORM-AGNOSTIC extra buildpacks (inline scripts, local dir/tarball,
+	// urn:cnb:registry, single-manifest images): the backend staged them as one local
+	// (extraBuildpacksLocalName), arch-neutral, so copy the SAME tree over /cnb/buildpacks
+	// on every leg. Done BEFORE the per-arch images so an arch-specific buildpack of the
+	// same id/version would win.
+	if in.hasAgnosticBuildpacks {
+		agSrc := llb.Local(extraBuildpacksLocalName)
+		base = base.File(
+			llb.Copy(agSrc, "/cnb/buildpacks", "/cnb/buildpacks", &llb.CopyInfo{
+				CreateDestPath:      true,
+				AllowWildcard:       true,
+				AllowEmptyWildcard:  true,
+				CopyDirContentsOnly: true,
+			}),
+			llb.WithCustomNamef("[%s] add platform-agnostic buildpacks", plat),
+		)
+	}
+
+	// Multi-arch extra buildpacks (--buildpack / project.toml): each is a multi-arch
+	// registry image (pack verified it supports platform p). We pull its PER-PLATFORM
+	// child image (extraBuildpackRefs are already pinned to the p-arch child digest by the
+	// caller) and COPY its /cnb/buildpacks over the builder's before detect. This adds new
+	// modules and OVERRIDES same-id/version ones, and — crucially — gives EACH
+	// architecture its OWN arch-matching buildpack binaries (PLATFORM-1662 FR-8b), unlike
+	// staging a single host-arch tree onto every leg. Copying (vs mounting) is
+	// intentional: the modules must persist through the detect/build RUNs. These only
+	// mutate the transient builder state; the final image is assembled FROM the run image.
+	for i, bpRef := range extraBuildpackRefs {
+		bpSrc := llb.Image(bpRef, llb.Platform(p))
 		base = base.File(
 			// CopyDirContentsOnly is REQUIRED: /cnb/buildpacks already exists in the
-			// builder, and BuildKit's Copy otherwise nests the source dir UNDER the
-			// destination (yielding /cnb/buildpacks/buildpacks/...). Copying contents
-			// merges the staged {id}/{version}/* trees INTO the builder's existing
-			// /cnb/buildpacks so the order.toml references resolve.
+			// builder; copying CONTENTS merges the buildpack image's {id}/{version}/*
+			// trees INTO the builder's existing /cnb/buildpacks (not nested under it) so
+			// the order.toml references resolve.
 			llb.Copy(bpSrc, "/cnb/buildpacks", "/cnb/buildpacks", &llb.CopyInfo{
 				CreateDestPath:      true,
 				AllowWildcard:       true,
 				AllowEmptyWildcard:  true,
 				CopyDirContentsOnly: true,
 			}),
-			llb.WithCustomNamef("[%s] add user buildpacks", plat),
+			llb.WithCustomNamef("[%s] add user buildpack %d/%d", plat, i+1, len(extraBuildpackRefs)),
 		)
 	}
 

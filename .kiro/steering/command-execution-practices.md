@@ -1,3 +1,7 @@
+---
+inclusion: always
+---
+
 # Command Execution Practices (avoid terminal hangs + re-approvals)
 
 Lessons learned while iterating on the BuildKit multi-arch work. Following these
@@ -29,15 +33,18 @@ Two acceptable patterns:
    #!/bin/bash
    # Usage: bash /tmp/run.sh /tmp/cmds/<NNN-desc>.sh
    # Runs the given command file, teeing combined output to a timestamped log.
+   # Logs go under ~/tmp so they PERSIST across restarts (see command-output-logging).
+   # NOTE: use ${HOME} (NOT a quoted "~") — a tilde inside double quotes does not expand.
    set -o pipefail
-   mkdir -p /tmp/kiro-command-logs
+   LOGDIR="${HOME}/tmp/kiro-command-logs"
+   mkdir -p "$LOGDIR"
    cmd_file="$1"
    if [ -z "$cmd_file" ] || [ ! -f "$cmd_file" ]; then
      echo "run.sh: command file not found: $cmd_file" >&2
      exit 2
    fi
    base="$(basename "$cmd_file" .sh)"
-   log="/tmp/kiro-command-logs/${base}-$(date +%Y%m%d-%H%M%S).log"
+   log="${LOGDIR}/${base}-$(date +%Y%m%d-%H%M%S).log"
    echo "RUN: $cmd_file  ($(date -u +%FT%TZ))" | tee "$log"
    bash "$cmd_file" 2>&1 | tee -a "$log"
    status="${PIPESTATUS[0]}"
@@ -194,7 +201,7 @@ RULES:
 - Prefer a few REUSABLE scripts (e.g. `/tmp/bk-inspect.sh`, `/tmp/optA-build.sh`)
   over a fresh inline command each time.
 - Shell or Python is fine — use whichever fits.
-- Keep the log-to-file convention (tee to `/tmp/kiro-command-logs/...`) INSIDE the
+- Keep the log-to-file convention (tee to `~/tmp/kiro-command-logs/...`) INSIDE the
   script.
 - Only bare, unchanging single commands (e.g. `docker buildx ls`,
   `git status`) are OK to run inline. When in doubt, use a script.

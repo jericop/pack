@@ -176,6 +176,6 @@ replace github.com/BurntSushi/toml => github.com/BurntSushi/toml v1.3.2
 //   repo:   https://github.com/jericop/cnb-lifecycle
 //   branch: https://github.com/jericop/cnb-lifecycle/tree/buildkit-native-export
 //   tag:    https://github.com/jericop/cnb-lifecycle/releases/tag/buildkit-native-export-v0.1.0
-replace github.com/buildpacks/lifecycle => github.com/jericop/cnb-lifecycle v0.0.0-20260830032718-10289fe7665b
+replace github.com/buildpacks/lifecycle => github.com/jericop/cnb-lifecycle v0.0.0-20260903185426-b9f607ca8e41
 
 go 1.26.6

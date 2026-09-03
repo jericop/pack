@@ -177,15 +177,24 @@ type PlatformBuildOpts struct {
 	// Network is the network mode for the build.
 	Network string
 
+	// ExtraBuildpackImages are the registry image references of user-supplied extra
+	// buildpacks (--buildpack / project.toml) that are MULTI-ARCH images. Each supports
+	// every requested platform (pack verifies this). For each platform leg the backend
+	// pulls the buildpack's PER-PLATFORM child image directly in LLB and COPYs its
+	// /cnb/buildpacks over the builder's, so each arch gets its OWN arch-matching
+	// buildpack binaries (PLATFORM-1662 FR-8b). Empty when none were requested.
+	ExtraBuildpackImages []string
+
 	// ExtraBuildpacksDir is a host directory (staged by pack) laid out as
-	// /cnb/buildpacks/{id}/{version}/* containing the user-supplied buildpack modules
-	// (--buildpack / --pre-buildpack / --post-buildpack, including urn:cnb:registry and
-	// local tarball/dir refs). When set, the backend syncs it in as an llb.Local and
-	// COPYs it over the builder's /cnb/buildpacks before detect, so added buildpacks
-	// participate and same-id/version buildpacks OVERRIDE the builder's copy. Empty when
-	// no extra buildpacks were requested. These modules only ever exist in the transient
-	// builder state; the final image is assembled FROM the run image, so they never leak
-	// into the output.
+	// /cnb/buildpacks/{id}/{version}/* containing the PLATFORM-AGNOSTIC extra buildpacks
+	// (inline scripts, local dir/tarball, urn:cnb:registry, single-manifest images). When
+	// set, the backend syncs it in as an llb.Local and COPYs it over the builder's
+	// /cnb/buildpacks on EVERY platform leg (same arch-neutral content for all). Empty
+	// when there are no agnostic extra buildpacks. Both ExtraBuildpackImages (per-arch)
+	// and ExtraBuildpacksDir (agnostic) can be set together.
+	//
+	// These modules only exist in the transient builder state; the final image is
+	// assembled FROM the run image, so they never leak into the output.
 	ExtraBuildpacksDir string
 
 	// OrderToml is the custom order.toml content to write into the builder.

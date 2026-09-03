@@ -1,10 +1,26 @@
-# Follow-ups (buildkit-native-export)
+# Follow-ups (buildkit-native-export) — RETIRED
+
+> **RETIRED — do not use as source of truth.** The PLATFORM-1662 fork follow-ups now live
+> in the spec at `.kiro/specs/platform-1662-buildkit-followups/`
+> (`requirements.md` / `design.md` / `tasks.md`). Make all updates there.
+>
+> **Current required task:** there is exactly ONE actionable pack change right now — FR-7 /
+> Task 7: **flatten the ephemeral builder** so extra buildpacks don't hit `max depth
+> exceeded`, then publish a new fork pack image on
+> `buildkit-native-export-with-history-and-kiro` and hand back for testing. Everything else
+> is reference (fixed / WON'T FIX / deferred / Jenkins-library-owned).
+>
+> The content below is HISTORICAL and kept only for git history.
+
+---
 
 Issues and deferred improvements for the BuildKit multi-arch (`--build-backend
 buildkit`) fork work. Found while benchmarking the Rapid7 Jenkins PLATFORM-1662
 multi-arch build performance comparison (buildkit emulation vs the existing multi-agent
-native strategy), which drives the fork `pack` binary from Jenkins against six sample
-apps (go, nodejs, python, java, two lambdas) across `linux/amd64,linux/arm64`.
+native strategy), which drives the fork `pack` binary from Jenkins against five sample
+apps (go, nodejs, python, java, agent-patcher) across `linux/amd64,linux/arm64`.
+(`pd-rds-postgres-password-lambda` was excluded — its PyGreSQL dep needs the postgres
+client, which the patched noble builder lacks; not a valid emulation test subject.)
 
 Severity legend:
 - **BLOCKER** — currently fails a build; needs a fix (or a documented workaround).
@@ -322,3 +338,217 @@ updates. That removes both the repeated-`DONE` flood (#5) and, combined with col
 the env-file writes into one vertex (#4), keeps the default output to one start + one end
 per real step. `--verbose` can then add the per-refresh/per-log-line detail on top. Review
 this approach when implementing.
+
+
+---
+
+## 6. [BLOCKER — Jenkins library, NOT the fork] File OWNERSHIP: root-run container vs jenkins user
+
+> **Corrected diagnosis.** This is NOT a `--binding` file-mode bug and NOT a pack/fork bug.
+> It is file OWNERSHIP: a container running as **root** writes files onto the shared
+> workspace volume that the **jenkins** user (which runs `packBuildContainer` in the jnlp
+> container) then cannot cleanly read. The native arch tolerated it; the QEMU-emulated arch
+> surfaced it as `permission denied`. There are TWO related-but-SEPARATE instances — fix and
+> VERIFY each individually (fixing one does not prove the other). We must NOT chmod
+> app-source/binding files as a general workaround; fix OWNERSHIP at the point the root-run
+> step creates the files. The interim `chmod -R a+rX` on the binding dirs (added in the
+> buildkit-emulation `packBuildContainer`) is the WRONG fix and MUST be removed once 6a/6b
+> land. Both fixes are in the Jenkins shared library; the fork needs no change.
+
+**Symptom (as observed under emulation).** The NON-NATIVE (emulated, e.g. linux/arm64)
+platform fails while buildpacks read the maven-settings binding:
+
+```
+#21 [linux/arm64] unable to read platform bindings /platform
+#21 [linux/arm64] unable to create new binding from /platform/bindings/maven-settings
+#21 [linux/arm64] open /platform/bindings/maven-settings/settings.xml: permission denied
+```
+
+The NATIVE platform (linux/amd64) reads the same files fine.
+
+### 6a. mvnPipeline: root-owned `mvn package` outputs (`target/`)
+- In `mvnPipeline`, `mvn package` runs in the **maven** container as **root**, so build
+  outputs (e.g. `target/`, consumed by the buildpack build via
+  `BP_MAVEN_BUILT_ARTIFACT=target/*.jar`) are root-owned. `packBuildContainer` runs in the
+  **jnlp** container as the **jenkins** user on the SAME shared workspace volume and can't
+  cleanly read them.
+- **Fix (library `mvnPipeline`):** chown the outputs to jenkins BEFORE `packBuildContainer`,
+  e.g. `container('maven') { sh 'chown -R jenkins target' }`.
+- **Verify individually:** re-run a `mvnPipeline` app (`pd-sample-java-app`) emulation build.
+- Applies to maven/JVM apps.
+
+### 6b. Library-created maven-settings / git-credential binding files
+- Observed on `pd-sample-go-app` (build #11), which uses `containerReleasePipeline`, NOT
+  `mvnPipeline` — so 6a does NOT explain it. The `maven-settings` binding is created by the
+  library itself (`configFileProvider` → `cp` into the binding dir); those files weren't
+  readable by the jenkins/CNB user on the emulated arch. The `chmod -R a+rX` workaround is
+  what let go-app get past bindings (builds #12/#13).
+- **Fix (library `packBuildContainer`):** create the binding files (maven-settings and
+  git-credential) OWNED BY / readable by the jenkins user by construction, rather than a
+  blanket chmod.
+- **Verify individually:** re-run a `containerReleasePipeline` app (`pd-sample-go-app`)
+  emulation build with the `chmod -R a+rX` workaround REMOVED; bindings must be readable.
+
+**Where.** Jenkins `jenkins-core-shared-libraries` (PLATFORM-1662 branches): `mvnPipeline`
+(6a) and the binding-dir creation in `vars/packBuildContainer.groovy` (6b, the
+`mkdir -p ... && cp ...` for maven-settings / git-credential in the buildkit multi-arch
+path). The `jericop/pack` fork needs NO change for Item 6.
+
+**Context.** Surfaced once the `-base` image fixed #1/#2. 6b found on go-app #11; 6a is the
+maven/JVM analog. NOTE: `pd-sample-java-app` (mvnPipeline) emulation SUCCEEDED at ~435s in
+the run set — so 6a may not always block (depends on which files the build reads and their
+mode); still fix it so ownership is correct by construction rather than relying on umask.
+
+
+---
+
+## 7. [BLOCKER] Extra buildpacks + trusted builder → ephemeral builder create fails: `max depth exceeded`
+
+**Symptom.** When the build adds extra buildpack modules (`--buildpack ...`) on top of a
+trusted builder, the buildkit build fails:
+
+```
+Warning: Builder is trusted but additional modules were added; using the untrusted (5 phases) build flow
+ERROR: failed to build: failed to write image to the following tags:
+[pack.local/builder/<hex>:latest: loading image "pack.local/builder/<hex>:latest".
+ first error: embedded daemon response: max depth exceeded]
+```
+
+Reproduced on `pd-sample-nodejs-app` build #3 (jenkins-pd) with the
+`-with-history-and-kiro-base` image; its Jenkinsfile adds
+`--buildpack docker.io/paketobuildpacks/nodejs:latest`.
+
+**Cause.** Adding extra buildpack modules forces pack onto the "untrusted (5 phases)"
+flow even though the builder is trusted, and that flow CREATES an ephemeral builder image
+and loads it into the local docker daemon (`pack.local/builder/<hex>`). The daemon load
+fails with `max depth exceeded` (overlay2 has a ~128 layer limit; the fork builder is
+already deep, and the ephemeral-builder create adds more layers, exceeding it). Under the
+buildkit backend this ephemeral-builder-via-daemon path should not be needed (the buildkit
+backend runs the lifecycle from the builder image in LLB and can overlay extra buildpacks
+in the build graph — see the `hasExtraBuildpacks` handling in `native_buildfunc.go`).
+
+**Desired behavior.** With `--build-backend buildkit` and extra buildpacks on a TRUSTED
+builder, do NOT fall back to the daemon ephemeral-builder create. Use the buildkit-native
+extra-buildpacks overlay path (copy the staged modules over `/cnb/buildpacks` in LLB, which
+the backend already supports) so no `pack.local/builder/...` image is created/loaded, and
+the overlay2 depth limit is never hit.
+
+**Where.** The trusted-vs-untrusted flow selection when extra buildpacks are present (pack
+build orchestration), and the buildkit backend's extra-buildpacks handling
+(`internal/build/multiplatform/native_buildfunc.go`, `hasExtraBuildpacks` /
+`extraBuildpacksLocalName`).
+
+**Context.** PLATFORM-1662 pd-sample-nodejs-app emulation build. Distinct from the QEMU-cgo
+crash (#8); this one fails before the arch build even starts, during ephemeral-builder
+creation.
+
+---
+
+## 8. [ENVIRONMENT, not a pack bug] QEMU-emulated cgo/gcc segfaults on the non-native arch
+
+**Symptom.** With everything else fixed, a multi-arch build gets both arches through
+detect and into the build phase; the NATIVE arch completes, but the EMULATED arch crashes
+the toolchain:
+
+```
+#24 [linux/arm64] runtime/cgo: gcc: signal: segmentation fault (core dumped)
+#24 [linux/arm64] failed to execute 'go build': exit status 1
+lifecycle: builder ERROR: process "/cnb/lifecycle/builder ..." did not complete successfully: exit code: 51
+```
+
+Reproduced on `pd-sample-go-app` build #12 (linux/arm64 under QEMU on an amd64 agent).
+
+**Cause.** This is QEMU user-mode emulation instability compiling the non-native arch: a
+cgo build invokes an emulated `gcc` that segfaults. It is NOT a pack/lifecycle/builder bug
+— it is the fundamental cost/risk of emulation for native-compilation workloads. (The
+multi-agent native strategy avoids it by compiling each arch on its own native agent.)
+
+**Mitigations / notes.**
+- For pure-Go apps, `CGO_ENABLED=0` avoids invoking the emulated gcc entirely. VERIFIED:
+  with `env.CGO_ENABLED='0'` set on the go-app emulation branch, build #13 SUCCEEDED
+  (~379s, `ci.pipeline.run.result=SUCCESS`), vs build #12 (cgo enabled) which crashed with
+  the emulated-gcc segfault. Not a general fix — apps that genuinely need cgo/native
+  extensions can't just disable it.
+- This is a KEY PLATFORM-1662 finding, not something to "fix" in pack: emulation is
+  unreliable for native compilation; prefer native multi-agent for such workloads.
+
+---
+
+## 8b. [FIXED, uncommitted] Extra buildpacks on the buildkit backend must be delivered per-arch (multi-arch images) OR staged once (platform-agnostic/inline)
+
+**Symptom.** With the buildkit backend and a multi-arch build (`--platform linux/amd64
+--platform linux/arm64`), extra buildpacks added via `--buildpack` or the project
+descriptor were staged ONCE from the host arch and copied to BOTH platform legs. So the
+emulated arch leg ran host-arch buildpack binaries. Concretely, on `agent-patcher-service`
+the arm64 leg ran amd64 `python3` from the cpython buildpack → `SIGTRAP` / `ENOENT` under
+Jenkins emulation. Root cause: buildpack binaries are arch-specific, but only one arch's
+tree was delivered.
+
+**Fix (two coexisting delivery paths, buildkit-specific; single-arch daemon path
+untouched).** Classify each extra buildpack and deliver it correctly:
+
+- **Per-arch (multi-arch registry image = an OCI index).** Pull the per-platform CHILD
+  image in LLB (`llb.Image(ref, llb.Platform(p))`) so each leg overlays its own
+  arch-matching `/cnb/buildpacks/...`. `verifyBuildpackImageSupportsPlatforms` confirms the
+  index covers every requested platform (else error early with a clear message).
+- **Platform-agnostic (inline `project.toml` script buildpack, local dir/tarball URI,
+  `urn:cnb:registry` ref, OR a single-manifest — non-index — registry image).** Stage ONCE
+  (reusing `stageExtraBuildpacks`) and copy the SAME tree to every leg via a single
+  `llb.Local(extraBuildpacksLocalName)`. Single-manifest registry images are ALLOWED as
+  agnostic (NOT hard-errored): shell-script buildpacks using built-in `tar`/`cp` are
+  legitimately arch-neutral; an old amd64-only buildpack used this way is the author's
+  responsibility (it will fail at exec on the other arch).
+
+**Classification signal (authoritative).** The fetched module's `Descriptor().Targets()`:
+empty targets / `OS==""` / `Arch==""` ⇒ platform-agnostic (matches
+`dist.BuildpackDescriptor.EnsureTargetSupport` "supports all", and `createInlineBuildpack`
+emits an empty `dist.Target{}`). Concrete `{OS,Arch}` targets ⇒ that buildpack came from a
+multi-arch image and is excluded from agnostic staging to avoid double-injection. Per-arch
+images are derived from "PackageLocator whose manifest is an index"; agnostic staging =
+`fetchedBPs` filtered to agnostic Targets. No locator string-matching.
+
+**LLB overlay order in `buildEmitLLB`:** builder `/cnb/buildpacks` → agnostic staged tree
+(same on every leg) → each per-arch image child (later overrides earlier).
+
+**Verified end-to-end (local: Apple-Silicon host, amd64 emulated).**
+- Multi-arch registry image (per-arch path): `agent-patcher-service` + `--buildpack`
+  multi-arch cpython → arm64 leg `GOARCH=arm64`, arm64 python tarball, `pip --version`
+  succeeded on both legs, `Finalized CNB metadata for manifest list`.
+- Inline + agnostic (staged-once path) coexisting with per-arch registry buildpacks:
+  `agent-patcher-service` built with `--descriptor inline-test-project.toml` (its real
+  order: go-dist → build-plan → INLINE `registry-assember` → python), NO `--buildpack`.
+  `add platform-agnostic buildpacks` vertex fired on BOTH legs; the inline
+  `registry-assember` ran `go install rapid7.com/registry_assembler/` on BOTH `linux/amd64`
+  and `linux/arm64`; the multi-arch registry buildpacks were delivered per-arch
+  (`add user buildpack 1/3..3/3`); build reached `Finalized CNB metadata for manifest
+  list`.
+
+**Testing lesson.** `--buildpack` OVERRIDES the `project.toml` order entirely
+(`processBuildpacks`: `declaredBPs := opts.Buildpacks`, only falls back to
+`opts.ProjectDescriptor.Build.Buildpacks` when `opts.Buildpacks` is empty). To exercise a
+descriptor-driven INLINE buildpack you must NOT pass `--buildpack`.
+
+**Files (uncommitted, in this worktree).**
+- `pkg/client/build.go` — classification + staging split (per-arch image list vs agnostic
+  staged dir), `verifyBuildpackImageSupportsPlatforms` (index only; single-manifest ⇒
+  agnostic, not error), `buildMultiPlatform` signature (+ agnostic dir),
+  `collectBuildkitPerArchBuildpackImages` / `stageAgnosticExtraBuildpacks` /
+  `moduleIsPlatformAgnostic`; import `ggcrremote`.
+- `internal/build/multiplatform/native_buildfunc.go` — `buildEmitLLB` copies agnostic local
+  + per-arch image children; `nativeBuildInputs` carries `hasAgnostic` +
+  `extraBuildpackImages`.
+- `internal/build/multiplatform/backend_native.go` — re-add agnostic local mount
+  (`extraBuildpacksLocalName`) + pass per-arch images.
+- `internal/build/multiplatform/backend.go` — signature plumbing.
+
+**Remaining before spec/commit.**
+- Revert instrumented cpython buildpack (troubleshooting only): repo
+  `/Users/jpena/repos/jericop/cpython` branch `PLATFORM-1662-buildkit-emulation`, files
+  `pl1662_diag.go`, `build.go`, `pip_cleanup.go` (the `[PL1662] cpython.Build` /
+  `pip --version` log lines originate there, NOT in pack). No pack-side debug prints remain.
+- Fold FR-8b (both delivery paths + agnostic/inline classification) into the spec at
+  `.kiro/specs/platform-1662-buildkit-followups/` and add unit tests
+  (`moduleIsPlatformAgnostic` classification; single-manifest ⇒ agnostic;
+  index-missing-platform ⇒ error; overlay order).
+- All pack changes above are UNCOMMITTED in worktree
+  `/Users/jpena/.repos/jericop/cnb-pack/buildkit-native-export-with-history-and-kiro`.
