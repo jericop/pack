@@ -1,4 +1,4 @@
-# Design: PLATFORM-1662 BuildKit fork follow-ups
+# Design: PLATFORM-1802 BuildKit fork follow-ups
 
 This document maps each finding to the code that must change (or changed). This spec is the
 single source of truth (the former `FOLLOWUPS.md` is retired). File paths are relative to
@@ -267,7 +267,7 @@ ordering, and acceptance criteria live in the dedicated spec
 `.kiro/specs/buildkit-extension-support/` (requirements + design + tasks). This section is a
 pointer; do not duplicate the detail here.
 
-## PLATFORM-1662 performance context (why this matters)
+## PLATFORM-1802 performance context (why this matters)
 
 For the apps that build on BOTH strategies, emulation wall-clock was ~1.2–1.4× the
 multi-agent wall-clock (MULTIPLICATIVE, i.e. 17%–36% longer — NOT 2×):

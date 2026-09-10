@@ -58,11 +58,11 @@ Command execution follows the `command-execution` steering (stable `bash run.sh 
 - [x] Ensure translator + discovery unit tests are complete and green (build+vet+test)
 - [x] Note integration tests as a later follow-up (NFR-3)
 
-## Task 9: Update the platform-1662-buildkit-followups spec
+## Task 9: Update the platform-1802-buildkit-followups spec
 - [x] Mark the extension follow-up (FR to be added there) as implemented + locally validated;
       status table row + tasks
 
 ## Task 10: FINAL — flip the buildkit-native-export spec
-- [x] Only after platform-1662 spec is updated: change Req 12.7 + Req 13.8 from
+- [x] Only after platform-1802 spec is updated: change Req 12.7 + Req 13.8 from
       "extensions unsupported / out of scope" to IMPLEMENTED, describing the kaniko-free LLB
       generate+extend mechanism and the local validation

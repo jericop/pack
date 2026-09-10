@@ -2,18 +2,18 @@
 inclusion: manual
 ---
 
-# CPython buildpack: build / package / publish / consume (PLATFORM-1662 troubleshooting)
+# CPython buildpack: build / package / publish / consume (PLATFORM-1802 troubleshooting)
 
 How to build a CUSTOM `paketo-buildpacks/cpython` buildpack from the fork and use it in a
 local `pack build` so we can add diagnostics and see exactly what the cpython buildpack does
 (resolved dependency name/arch/url/source/checksum, extract path, symlinks, the commands it
-runs — e.g. `python3 -m pip --version`). Used to investigate PLATFORM-1662 FR-8b (the cpython
+runs — e.g. `python3 -m pip --version`). Used to investigate PLATFORM-1802 FR-8b (the cpython
 `python3` failure: ENOENT on emulated arm64 in Jenkins / SIGTRAP on native arm64 locally).
 
 ## Repo + branch
 
 - Source: `/Users/jpena/repos/jericop/cpython`
-- Branch: `PLATFORM-1662-buildkit-emulation` (already created)
+- Branch: `PLATFORM-1802-buildkit-emulation` (already created)
 - Do NOT add tests to the cpython buildpack for this work. The Go binary must COMPILE, then
   be built + packaged + published. That's the whole loop.
 
@@ -72,4 +72,4 @@ Run all steps from `/Users/jpena/repos/jericop/cpython`.
 - This custom buildpack is a TROUBLESHOOTING artifact, not a release. Revert/park the
   diagnostics once the root cause is found.
 - Relationship: the failing step is gated by `BP_CPYTHON_RM_SETUPTOOLS` (set by
-  agent-patcher-service). See the `platform-1662-buildkit-followups` spec FR-8b.
+  agent-patcher-service). See the `platform-1802-buildkit-followups` spec FR-8b.

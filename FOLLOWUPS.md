@@ -1,7 +1,7 @@
 # Follow-ups (buildkit-native-export) — RETIRED
 
-> **RETIRED — do not use as source of truth.** The PLATFORM-1662 fork follow-ups now live
-> in the spec at `.kiro/specs/platform-1662-buildkit-followups/`
+> **RETIRED — do not use as source of truth.** The PLATFORM-1802 fork follow-ups now live
+> in the spec at `.kiro/specs/platform-1802-buildkit-followups/`
 > (`requirements.md` / `design.md` / `tasks.md`). Make all updates there.
 >
 > **Current required task:** there is exactly ONE actionable pack change right now — FR-7 /
@@ -15,7 +15,7 @@
 ---
 
 Issues and deferred improvements for the BuildKit multi-arch (`--build-backend
-buildkit`) fork work. Found while benchmarking the Rapid7 Jenkins PLATFORM-1662
+buildkit`) fork work. Found while benchmarking the Rapid7 Jenkins PLATFORM-1802
 multi-arch build performance comparison (buildkit emulation vs the existing multi-agent
 native strategy), which drives the fork `pack` binary from Jenkins against five sample
 apps (go, nodejs, python, java, agent-patcher) across `linux/amd64,linux/arm64`.
@@ -108,7 +108,7 @@ builder (which cannot serve multi-platform buildkit), emit a clear, actionable e
 tells the user to create/select a `docker-container` (or `remote`) builder. Do NOT
 silently assume a `pack-multiplatform` builder exists. We should be deriving the default builder using the buildkit package in the go code rather than shelling out to run docker commands.
 
-**Workaround in use (PLATFORM-1662).** The Jenkins library creates a `docker-container`
+**Workaround in use (PLATFORM-1802).** The Jenkins library creates a `docker-container`
 buildx builder named `pack-multiplatform` (+ QEMU) and bootstraps it, then passes
 `--buildkit-builder pack-multiplatform` explicitly. So the fork works today only because
 the caller supplies both the builder and the matching name.
@@ -185,7 +185,7 @@ without the filter wrapper.
 
 > **Decision: accept that `--trust-builder` is required.** The fork builder is one we
 > built ourselves and is technically untrusted, so requiring `--trust-builder` (as the
-> PLATFORM-1662 pipeline already passes via `env.ADDITIONAL_PACK_ARGS`) is the accepted
+> PLATFORM-1802 pipeline already passes via `env.ADDITIONAL_PACK_ARGS`) is the accepted
 > behavior. No code change. The other options below (give the lifecycle a resolvable
 > version / publish a lifecycle image / soften the error for the buildkit backend) were
 > considered and NOT chosen.
@@ -212,7 +212,7 @@ builder lets pack run the builder's bundled lifecycle in place, avoiding the ima
   trusted-builders add <builder>`"). 
 - Accept that `--trust-builder` is required because we are using a builder that we built which is technically untrusted. I PICK THIS ONE
 
-**Workaround in use (PLATFORM-1662).** Pass `--trust-builder` (via
+**Workaround in use (PLATFORM-1802).** Pass `--trust-builder` (via
 `env.ADDITIONAL_PACK_ARGS`). This is required today for every emulation build.
 
 **Where.** Lifecycle-image resolution / trust gating in the build path (the error text is
@@ -389,7 +389,7 @@ The NATIVE platform (linux/amd64) reads the same files fine.
 - **Verify individually:** re-run a `containerReleasePipeline` app (`pd-sample-go-app`)
   emulation build with the `chmod -R a+rX` workaround REMOVED; bindings must be readable.
 
-**Where.** Jenkins `jenkins-core-shared-libraries` (PLATFORM-1662 branches): `mvnPipeline`
+**Where.** Jenkins `jenkins-core-shared-libraries` (PLATFORM-1802 branches): `mvnPipeline`
 (6a) and the binding-dir creation in `vars/packBuildContainer.groovy` (6b, the
 `mkdir -p ... && cp ...` for maven-settings / git-credential in the buildkit multi-arch
 path). The `jericop/pack` fork needs NO change for Item 6.
@@ -438,7 +438,7 @@ build orchestration), and the buildkit backend's extra-buildpacks handling
 (`internal/build/multiplatform/native_buildfunc.go`, `hasExtraBuildpacks` /
 `extraBuildpacksLocalName`).
 
-**Context.** PLATFORM-1662 pd-sample-nodejs-app emulation build. Distinct from the QEMU-cgo
+**Context.** PLATFORM-1802 pd-sample-nodejs-app emulation build. Distinct from the QEMU-cgo
 crash (#8); this one fails before the arch build even starts, during ephemeral-builder
 creation.
 
@@ -469,7 +469,7 @@ multi-agent native strategy avoids it by compiling each arch on its own native a
   (~379s, `ci.pipeline.run.result=SUCCESS`), vs build #12 (cgo enabled) which crashed with
   the emulated-gcc segfault. Not a general fix — apps that genuinely need cgo/native
   extensions can't just disable it.
-- This is a KEY PLATFORM-1662 finding, not something to "fix" in pack: emulation is
+- This is a KEY PLATFORM-1802 finding, not something to "fix" in pack: emulation is
   unreliable for native compilation; prefer native multi-agent for such workloads.
 
 ---
@@ -543,11 +543,11 @@ descriptor-driven INLINE buildpack you must NOT pass `--buildpack`.
 
 **Remaining before spec/commit.**
 - Revert instrumented cpython buildpack (troubleshooting only): repo
-  `/Users/jpena/repos/jericop/cpython` branch `PLATFORM-1662-buildkit-emulation`, files
+  `/Users/jpena/repos/jericop/cpython` branch `PLATFORM-1802-buildkit-emulation`, files
   `pl1662_diag.go`, `build.go`, `pip_cleanup.go` (the `[PL1662] cpython.Build` /
   `pip --version` log lines originate there, NOT in pack). No pack-side debug prints remain.
 - Fold FR-8b (both delivery paths + agnostic/inline classification) into the spec at
-  `.kiro/specs/platform-1662-buildkit-followups/` and add unit tests
+  `.kiro/specs/platform-1802-buildkit-followups/` and add unit tests
   (`moduleIsPlatformAgnostic` classification; single-manifest ⇒ agnostic;
   index-missing-platform ⇒ error; overlay order).
 - All pack changes above are UNCOMMITTED in worktree

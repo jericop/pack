@@ -19,7 +19,7 @@ the existing over-LLB inject-and-update-order path. Source the few builder attri
 buildkit path still reads (UID/GID, stack/distro labels, platform API) from the **base**
 builder object rather than the synthesized one.
 
-This is the performance follow-up to **FR-7** in `platform-1662-buildkit-followups`. FR-7
+This is the performance follow-up to **FR-7** in `platform-1802-buildkit-followups`. FR-7
 flattened the ephemeral builder so it was *loadable* on a deep base. This spec removes the
 daemon load from the buildkit path entirely, which also makes the `max depth exceeded` class
 impossible there by construction.
@@ -119,7 +119,7 @@ they can be sourced from the base builder object with no daemon `Save`.
   per-arch log split by the `[linux/<arch>]` prefix).
 
 ### NFR-3: relationship to the existing spec
-- Performance follow-up to FR-7 in `platform-1662-buildkit-followups`. Cross-link, do not
+- Performance follow-up to FR-7 in `platform-1802-buildkit-followups`. Cross-link, do not
   duplicate.
 
 ## Out of Scope
@@ -127,4 +127,4 @@ they can be sourced from the base builder object with no daemon `Save`.
 - The daemon (non-buildkit) executor behavior and its ephemeral builder synthesis.
 - Any lifecycle change (the on-disk `/cnb` + `order.toml` contract the detector reads is
   already satisfied by the existing inject path).
-- FR-8 / FR-9 investigations (tracked in `platform-1662-buildkit-followups`).
+- FR-8 / FR-9 investigations (tracked in `platform-1802-buildkit-followups`).

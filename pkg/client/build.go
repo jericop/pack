@@ -928,7 +928,7 @@ func (c *Client) Build(ctx context.Context, opts BuildOptions) error {
 		// must be arch-matching per platform leg. Split them:
 		//  - MULTI-ARCH registry images: the backend pulls each buildpack's PER-PLATFORM
 		//    child image in LLB (arch-correct binaries per leg) — avoids the wrong-arch
-		//    buildpack-binary bug (PLATFORM-1662 FR-8b).
+		//    buildpack-binary bug (PLATFORM-1802 FR-8b).
 		//  - PLATFORM-AGNOSTIC ones (inline scripts, local dir/tarball, urn:cnb:registry,
 		//    single-manifest images): staged once and copied to EVERY leg.
 		// Neither touches the single-arch daemon fetch path.
@@ -944,7 +944,7 @@ func (c *Client) Build(ctx context.Context, opts BuildOptions) error {
 		// Image extensions (--extension) are classified the SAME way as buildpacks for
 		// the buildkit backend (spec buildkit-extension-support): MULTI-ARCH images are
 		// pulled per-platform child in LLB; agnostic ones (inline/local/single-manifest)
-		// are staged once and copied to every leg's /cnb/extensions (PLATFORM-1662 FR-8b).
+		// are staged once and copied to every leg's /cnb/extensions (PLATFORM-1802 FR-8b).
 		extraExImages, err := c.collectBuildkitPerArchExtensionImages(opts, opts.Platforms)
 		if err != nil {
 			return err
@@ -1474,7 +1474,7 @@ func extractModuleToDir(module buildpack.BuildModule, destDir string) error {
 // project.toml) are MULTI-ARCH registry images, for the BUILDKIT backend. Those are the
 // only ones that need per-platform handling: standard pack fetches a buildpack for a
 // SINGLE (host/builder) arch, so for a multi-arch buildpack the arm64 leg would otherwise
-// run amd64 binaries (PLATFORM-1662 FR-8b). For each such image the backend pulls the
+// run amd64 binaries (PLATFORM-1802 FR-8b). For each such image the backend pulls the
 // buildpack's PER-PLATFORM child image directly in LLB (see buildEmitLLB).
 //
 // Every OTHER kind of extra buildpack is treated as PLATFORM-AGNOSTIC and staged once by
@@ -1548,7 +1548,7 @@ func stageAgnosticExtraBuildpacks(fetchedBPs []buildpack.BuildModule) (string, f
 // collectBuildkitPerArchBuildpackImages (spec buildkit-extension-support): it identifies
 // which extra extensions (--extension) are MULTI-ARCH registry images so the backend can
 // pull each extension's PER-PLATFORM child image in LLB (arch-correct binaries per leg,
-// PLATFORM-1662 FR-8b). Every other kind (local dir/tarball, single-manifest image) is
+// PLATFORM-1802 FR-8b). Every other kind (local dir/tarball, single-manifest image) is
 // platform-agnostic and staged once by stageAgnosticExtensions. Extensions have no
 // project.toml counterpart, so the declared refs come solely from opts.Extensions (the
 // same source processExtensions uses). Reuses verifyBuildpackImageSupportsPlatforms, which
@@ -2553,7 +2553,7 @@ func (c *Client) createEphemeralBuilder(
 	// image layer per extra buildpack module can push the image past the daemon's
 	// layer-depth cap ("max depth exceeded") before any lifecycle phase runs.
 	// Flattening keeps the added modules to O(1) layers regardless of how many are
-	// added. See FR-7 (PLATFORM-1662 follow-ups).
+	// added. See FR-7 (PLATFORM-1802 follow-ups).
 	bldr, err := builder.New(rawBuilderImage, builderName, builder.WithRunImage(runImage), builder.WithFlattenAllModules())
 	if err != nil {
 		return nil, errors.Wrapf(err, "invalid builder %s", style.Symbol(origBuilderName))

@@ -1,7 +1,7 @@
 # Design: Skip the daemon-synthesized ephemeral builder on the buildkit backend
 
 File paths are relative to the fork repo root (`buildkit-native-export-with-history-and-kiro`
-branch). Performance follow-up to FR-7 in `platform-1662-buildkit-followups`.
+branch). Performance follow-up to FR-7 in `platform-1802-buildkit-followups`.
 
 ## Key finding (confirmed in source)
 

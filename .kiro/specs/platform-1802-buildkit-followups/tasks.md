@@ -1,6 +1,6 @@
-# Tasks: PLATFORM-1662 BuildKit fork follow-ups
+# Tasks: PLATFORM-1802 BuildKit fork follow-ups
 
-How to look up the build data: steering `platform-1662-benchmark-data.md`. How to publish
+How to look up the build data: steering `platform-1802-benchmark-data.md`. How to publish
 the fork image: steering `fork-release-process.md`. This spec is the single source of truth
 (the former `FOLLOWUPS.md` is retired).
 
@@ -197,12 +197,12 @@ as `permission denied` on the emulated arch) but fix + VERIFY each individually.
       `pip --version` ok both legs).
 - References: FR-8 (8a environment; 8b via FR-8b-impl), Task 8b-impl
 
-## Task 9: Re-run the PLATFORM-1662 comparison after 7 & 8b land
+## Task 9: Re-run the PLATFORM-1802 comparison after 7 & 8b land
 - [x] With FR-7 + FR-8b fixed and the fork images republished, re-ran all four pd-sample
       emulation builds (2026-09-07): go 926s, java 510s, python 1752s, nodejs 6510s — ALL
       SUCCESS multi-arch. Results captured in
-      `dot-kiro-files/PLATFORM-1662-fr8b-fr9-validation-commit-msg.md`.
-- [ ] Update the comparison table in the Rapid7 PLATFORM-1662 spec/ticket with these numbers
+      `dot-kiro-files/PLATFORM-1802-fr8b-fr9-validation-commit-msg.md`.
+- [ ] Update the comparison table in the Rapid7 PLATFORM-1802 spec/ticket with these numbers
       (note: higher than the earlier baseline — run-to-run variance + cold cache after a fresh
       image publish; re-measure before any cost decision). Also note nodejs still carries the
       FR-9 post-emit stall.

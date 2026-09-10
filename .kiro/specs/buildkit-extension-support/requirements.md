@@ -49,7 +49,7 @@ silently ignoring it.
 Benefits that fall out of doing it in LLB:
 - **Per-architecture correctness for free** — extend runs as ordinary vertices in the same
   per-platform graph we already emit, so each arch extends its own build/run image (matching
-  PLATFORM-1662 FR-8b), with no extra machinery.
+  PLATFORM-1802 FR-8b), with no extra machinery.
 - **No kaniko volume-cache constraint** — extend-build no longer forces a volume build cache.
 - **One execution engine** — the whole build, extensions included, is one LLB solve.
 

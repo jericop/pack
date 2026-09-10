@@ -1,9 +1,9 @@
-# Requirements: PLATFORM-1662 BuildKit fork follow-ups
+# Requirements: PLATFORM-1802 BuildKit fork follow-ups
 
 ## Overview
 
 This spec captures the issues found in the `jericop/pack` BuildKit multi-arch fork
-(`--build-backend buildkit`) while running the Rapid7 **PLATFORM-1662** benchmark — a
+(`--build-backend buildkit`) while running the Rapid7 **PLATFORM-1802** benchmark — a
 head-to-head of two multi-arch container-build strategies in Jenkins:
 
 1. **multi-agent (native):** each arch built on its own native agent, then a manifest
@@ -41,7 +41,7 @@ The `FOLLOWUPS.md` file that previously held the long-form per-item reference is
 retired in favor of this spec — this spec (requirements/design/tasks) is now the single
 source of truth; do not add new detail to `FOLLOWUPS.md`.
 
-See the steering file `platform-1662-benchmark-data.md` for how to look up the Jenkins
+See the steering file `platform-1802-benchmark-data.md` for how to look up the Jenkins
 builds, Grafana traces/logs, the Jenkins shared-library branches, and the sample-app repos
 used to reproduce any of these. See `fork-release-process.md` for how to build and publish
 the fork pack image on this branch.
@@ -108,7 +108,7 @@ ERROR: failed to build: failed to write image to the following tags:
   **adding N extra modules adds O(1) image layers to the builder, not O(N)**, and the loaded
   builder image stays comfortably under the daemon layer cap.
 - The fix MUST apply regardless of `--build-backend` value for the layer-depth invariant, but
-  at minimum MUST make the buildkit-backend path (the PLATFORM-1662 pipeline) succeed with an
+  at minimum MUST make the buildkit-backend path (the PLATFORM-1802 pipeline) succeed with an
   extra buildpack on a deep trusted builder.
 - MUST NOT be worked around by squashing the final APP image (export is never reached) or by
   chmod/daemon-storage hacks.
@@ -128,7 +128,7 @@ ERROR: failed to build: failed to write image to the following tags:
   `jericop/pack:buildkit-native-export-with-history-and-kiro` (NO git tag required). See
   `dot-kiro-files/publish-images-runbook.md` section 3A. Record the pushed image tag/digest
   in the tasks file.
-- AC-4 (handoff/test): after publish, the PLATFORM-1662 pipeline is pointed at the new image
+- AC-4 (handoff/test): after publish, the PLATFORM-1802 pipeline is pointed at the new image
   (`env.PACK_FORK_IMAGE`) and the nodejs emulation build is re-run to confirm the fix end to
   end. (This step happens in the jenkins-core-shared-libraries repo, not here.)
 
@@ -143,7 +143,7 @@ ERROR: failed to build: failed to write image to the following tags:
 
 ## Reference requirements (NOT current tasks — context only)
 
-The remaining FRs are recorded for context and traceability of ALL PLATFORM-1662 findings.
+The remaining FRs are recorded for context and traceability of ALL PLATFORM-1802 findings.
 They are either already implemented, decided WON'T FIX, deferred/optional, or owned by the
 Jenkins library. Do not action them under this spec unless explicitly asked.
 
@@ -170,7 +170,7 @@ Jenkins library. Do not action them under this spec unless explicitly asked.
 ### FR-3 (Item 3, WON'T FIX): `--trust-builder` is required for the fork builder — accepted
 - No code change. The fork builder is self-built and technically untrusted; requiring
   `--trust-builder` is accepted behavior. Documented so callers know to pass it. (The
-  PLATFORM-1662 pipeline passes it via `env.ADDITIONAL_PACK_ARGS`.)
+  PLATFORM-1802 pipeline passes it via `env.ADDITIONAL_PACK_ARGS`.)
 - Recorded here (not dropped) so the decision is discoverable and not re-litigated.
 
 ### FR-4 (Item 4, FIXED): collapse `platform env:` writes into one progress vertex
@@ -227,9 +227,9 @@ workaround (`chmod -R a+rX` on the binding dirs in the buildkit-emulation
   build with the chmod workaround REMOVED and confirm bindings are readable.
 
 NOTE: both fixes are in the Jenkins shared library (`jenkins-core-shared-libraries`,
-PLATFORM-1662 branches). The `jericop/pack` fork needs NO change for Item 6 (re-evaluate
+PLATFORM-1802 branches). The `jericop/pack` fork needs NO change for Item 6 (re-evaluate
 only if a genuine binding-permission issue remains after ownership is corrected). Tracked
-here for completeness of the PLATFORM-1662 findings.
+here for completeness of the PLATFORM-1802 findings.
 
 ### FR-7 — FIXED + VALIDATED
 See the "Fixed + validated pack code changes" section above. FR-7 (flatten the ephemeral
@@ -274,7 +274,7 @@ FR-8b-impl (see that requirement for the fix + validation).
 ### FR-9 (Item 9, OPEN — perf): long post-emit stall after `exporter (emit-mode) DONE`
 - OBSERVED on MULTIPLE emulation builds across languages (go, nodejs, java): after the
   exporter's emit step completes, the build sits for a noticeably long time before finishing,
-  apparently around resolving the run-image config. Quantified impact from the PLATFORM-1662
+  apparently around resolving the run-image config. Quantified impact from the PLATFORM-1802
   Grafana summary (emulation wall-clock vs multi-agent, last SUCCESS):
   - pd-sample-nodejs-app: multi-agent ~445s vs **emulation ~4903s (~11x)** — extreme outlier.
   - pd-sample-java-app:   multi-agent ~345s vs **emulation ~536s (~1.55x)**.
@@ -409,7 +409,7 @@ per-arch correctness for free and dropping the daemon's kaniko volume-cache cons
 `.kiro/specs/buildkit-extension-support/` (requirements + design + tasks). That spec is the
 source of truth for the mechanism, the restricted translator, the shared generated-layout
 discovery reuse seam, the phase ordering, and the acceptance criteria. This FR-10 exists so
-the PLATFORM-1662 follow-up set records it and points at that spec.
+the PLATFORM-1802 follow-up set records it and points at that spec.
 
 **Acceptance (summary; see the dedicated spec for AC-1..AC-6):** generate runs per platform;
 a `run.Dockerfile` patch shows on the final image on both arches; a `build.Dockerfile` tool is
@@ -425,13 +425,13 @@ integration tests (NFR-3) remain PENDING.
 
 ### NFR-1: this spec is the single source of truth (FOLLOWUPS.md retired)
 - This spec (requirements/design/tasks) is now the single source of truth for the
-  PLATFORM-1662 fork follow-ups. The former `FOLLOWUPS.md` at the repo root is RETIRED — do
+  PLATFORM-1802 fork follow-ups. The former `FOLLOWUPS.md` at the repo root is RETIRED — do
   not add new detail there; if it still exists it is historical only. When an item's status
   changes, update THIS spec.
 
 ### NFR-2: reproducibility
-- Any investigation MUST be reproducible from the PLATFORM-1662 build data. The steering
-  file `platform-1662-benchmark-data.md` documents the Jenkins jobs, Grafana queries,
+- Any investigation MUST be reproducible from the PLATFORM-1802 build data. The steering
+  file `platform-1802-benchmark-data.md` documents the Jenkins jobs, Grafana queries,
   shared-library branches, sample-app repos, and the fork image used, so a developer can
   re-run or inspect any referenced build.
 
@@ -447,6 +447,6 @@ integration tests (NFR-3) remain PENDING.
 
 ## Out of Scope
 - The Jenkins shared-library changes themselves (they live in the Rapid7
-  `jenkins-core-shared-libraries` repo, PLATFORM-1662 branches). This spec covers the
+  `jenkins-core-shared-libraries` repo, PLATFORM-1802 branches). This spec covers the
   `jericop/pack` fork side only.
 - The multi-agent (native) build path — it is the baseline, not under change here.

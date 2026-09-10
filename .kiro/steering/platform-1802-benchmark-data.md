@@ -2,19 +2,19 @@
 inclusion: manual
 ---
 
-# PLATFORM-1662 benchmark data: how to look up builds, logs, and branches
+# PLATFORM-1802 benchmark data: how to look up builds, logs, and branches
 
 Reference for investigating the `jericop/pack` BuildKit fork issues found during the
-Rapid7 PLATFORM-1662 multi-arch build performance comparison. Use this to reproduce a
+Rapid7 PLATFORM-1802 multi-arch build performance comparison. Use this to reproduce a
 failing build, read its logs, or re-run the comparison after a fork fix. (See the spec
-`.kiro/specs/platform-1662-buildkit-followups/` and `FOLLOWUPS.md` for the issues.)
+`.kiro/specs/platform-1802-buildkit-followups/` and `FOLLOWUPS.md` for the issues.)
 
 ## What the comparison is
 
 Two multi-arch (`linux/amd64,linux/arm64`) build strategies, compared per app:
-- **multi-agent (native):** branch `PLATFORM-1662-multi-agent` — each arch builds on its
+- **multi-agent (native):** branch `PLATFORM-1802-multi-agent` — each arch builds on its
   own native Jenkins agent; manifest list assembled after. Baseline.
-- **buildkit-emulation:** branch `PLATFORM-1662-buildkit-emulation` — one agent, one
+- **buildkit-emulation:** branch `PLATFORM-1802-buildkit-emulation` — one agent, one
   `pack build --build-backend buildkit --platform linux/amd64 --platform linux/arm64`,
   QEMU for the non-native arch. Drives the fork `pack`.
 
@@ -48,15 +48,15 @@ postgres client installed; that client is not in the patched noble builder, so i
 build under emulation. Builder/app-dependency limitation, not an emulation/fork issue.
 Dropped from the set (participating apps: 5).
 
-Each repo has two comparison branches: `PLATFORM-1662-multi-agent` and
-`PLATFORM-1662-buildkit-emulation`. The emulation branch has the `@Library(
-'jenkins-core-shared-libraries@PLATFORM-1662-buildkit-emulation') _` override,
+Each repo has two comparison branches: `PLATFORM-1802-multi-agent` and
+`PLATFORM-1802-buildkit-emulation`. The emulation branch has the `@Library(
+'jenkins-core-shared-libraries@PLATFORM-1802-buildkit-emulation') _` override,
 `env.ARCH='linux/amd64,linux/arm64'`, `env.PACK_FORK_IMAGE`, and the buildkit
 `env.ADDITIONAL_PACK_ARGS`. Push a commit to a branch to trigger its build.
 
 ## The Jenkins shared library (emulation packBuildContainer)
 
-- Repo: `rapid7/jenkins-core-shared-libraries`, branch `PLATFORM-1662-buildkit-emulation`
+- Repo: `rapid7/jenkins-core-shared-libraries`, branch `PLATFORM-1802-buildkit-emulation`
   (git@github.com:rapid7/jenkins-core-shared-libraries.git).
 - `vars/packBuildContainer.groovy` (multi-arch path) is what invokes the fork pack:
   copies the fork binary out of `PACK_FORK_IMAGE`, creates+bootstraps a `docker-container`
@@ -66,7 +66,7 @@ Each repo has two comparison branches: `PLATFORM-1662-multi-agent` and
   pack-multiplatform --publish --binding ... ${ADDITIONAL_PACK_ARGS}`.
 - Local worktrees used during the work (Rapid7 dev machine):
   `/Users/jpena/.repos/r7/_pl1662_worktrees/<app>-{multi-agent,buildkit-emulation}` and the
-  library at `/Users/jpena/.repos/r7/jenkins-core-shared-libraries/PLATFORM-1662-buildkit-emulation`.
+  library at `/Users/jpena/.repos/r7/jenkins-core-shared-libraries/PLATFORM-1802-buildkit-emulation`.
 
 ## Reading build results + logs
 
@@ -76,7 +76,7 @@ Each repo has two comparison branches: `PLATFORM-1662-multi-agent` and
 - Search builds (newest-first) via the datasource proxy:
   ```
   GET /api/datasources/proxy/uid/kubernetes-traces/api/search
-      ?q={ span.ci.pipeline.id =~ "<app>.*PLATFORM-1662-<strategy>" && span.type = "job" }
+      ?q={ span.ci.pipeline.id =~ "<app>.*PLATFORM-1802-<strategy>" && span.type = "job" }
       &start=<unixSec>&end=<unixSec>&limit=50
   ```
   Returns `rootServiceName` (which Jenkins instance: `jenkins-pd` or `jenkins-asgard`),

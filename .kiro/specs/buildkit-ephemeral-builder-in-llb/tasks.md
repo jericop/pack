@@ -1,6 +1,6 @@
 # Tasks: Skip the daemon-synthesized ephemeral builder on the buildkit backend
 
-Performance follow-up to FR-7 (`platform-1662-buildkit-followups`). The buildkit path already
+Performance follow-up to FR-7 (`platform-1802-buildkit-followups`). The buildkit path already
 injects buildpacks + writes `/cnb/order.toml` over LLB using the BASE builder; this work just
 STOPS synthesizing/loading the wasted `pack.local/builder/<hex>` daemon image on that path.
 

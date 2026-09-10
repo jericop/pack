@@ -182,7 +182,7 @@ type PlatformBuildOpts struct {
 	// every requested platform (pack verifies this). For each platform leg the backend
 	// pulls the buildpack's PER-PLATFORM child image directly in LLB and COPYs its
 	// /cnb/buildpacks over the builder's, so each arch gets its OWN arch-matching
-	// buildpack binaries (PLATFORM-1662 FR-8b). Empty when none were requested.
+	// buildpack binaries (PLATFORM-1802 FR-8b). Empty when none were requested.
 	ExtraBuildpackImages []string
 
 	// ExtraBuildpacksDir is a host directory (staged by pack) laid out as
@@ -202,7 +202,7 @@ type PlatformBuildOpts struct {
 	// (pack verifies this). For each platform leg the backend pulls the extension's
 	// PER-PLATFORM child image directly in LLB and COPYs its /cnb/extensions over the
 	// builder's, so each arch gets its OWN arch-matching extension binaries
-	// (PLATFORM-1662 FR-8b). Empty when none were requested.
+	// (PLATFORM-1802 FR-8b). Empty when none were requested.
 	ExtraExtensionImages []string
 
 	// ExtraExtensionsDir is a host directory (staged by pack) laid out as

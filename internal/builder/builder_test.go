@@ -2005,7 +2005,7 @@ func testBuilder(t *testing.T, when spec.G, it spec.S) {
 			})
 		})
 
-		// AC-2 (PLATFORM-1662 / FR-7): the synthesized/ephemeral builder pack creates
+		// AC-2 (PLATFORM-1802 / FR-7): the synthesized/ephemeral builder pack creates
 		// when extra buildpacks are added to a trusted builder MUST add a flattened
 		// (single) image layer for N extra modules, not one layer per module. Adding
 		// one layer per module on top of an already-deep base builder is what pushed

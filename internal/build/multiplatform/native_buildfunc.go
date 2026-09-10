@@ -110,7 +110,7 @@ type nativeBuildInputs struct {
 	// (pack verified this). For each platform leg, buildEmitLLB pulls each buildpack's
 	// PER-PLATFORM child image and COPYs its /cnb/buildpacks over the builder's before
 	// detect — so every arch gets its OWN arch-matching buildpack binaries
-	// (PLATFORM-1662 FR-8b) and same-id/version modules override the builder's copy.
+	// (PLATFORM-1802 FR-8b) and same-id/version modules override the builder's copy.
 	extraBuildpackImages []string
 	// hasAgnosticBuildpacks indicates the backend staged PLATFORM-AGNOSTIC extra
 	// buildpacks (inline scripts, local dir/tarball, urn:cnb:registry, single-manifest
@@ -205,7 +205,7 @@ func nativeBuildPlatform(ctx context.Context, c client.Client, in nativeBuildInp
 	// Platform(p)) resolves the tag once to the daemon's default arch, so every
 	// platform leg would run the SAME arch's builder — e.g. the arm64 leg executing
 	// amd64 buildpack binaries, which then fetch amd64 dependencies (wrong-arch
-	// python3 -> SIGTRAP/ENOENT). PLATFORM-1662 FR-8b.
+	// python3 -> SIGTRAP/ENOENT). PLATFORM-1802 FR-8b.
 	builderRef, err := resolvePlatformRefNBF(ctx, c, in.builderImage, p)
 	if err != nil {
 		return nil, nil, err
@@ -229,7 +229,7 @@ func nativeBuildPlatform(ctx context.Context, c client.Client, in nativeBuildInp
 		extraBuildpackRefs = append(extraBuildpackRefs, bpRef)
 	}
 	// Resolve each extra EXTENSION image to its per-platform child digest, mirroring the
-	// buildpack loop above (PLATFORM-1662 FR-8b): each leg stages the arch-matching
+	// buildpack loop above (PLATFORM-1802 FR-8b): each leg stages the arch-matching
 	// extension binaries. pack has already verified each supports platform p.
 	var extraExtensionRefs []string
 	for _, exImg := range in.extraExtensionImages {
@@ -592,7 +592,7 @@ func resolveImageConfigNBF(ctx context.Context, c client.Client, ref string, p o
 // an explicit Platform yields a ref pinned to that platform's manifest digest, which
 // we then hand to llb.Image so each leg truly uses its own architecture. (The run image
 // already gets this treatment via the analyzer-pinned digest in analyzed.toml — see
-// resolvedRunImageRefNBF.) PLATFORM-1662 FR-8b.
+// resolvedRunImageRefNBF.) PLATFORM-1802 FR-8b.
 func resolvePlatformRefNBF(ctx context.Context, c client.Client, ref string, p ocispecs.Platform) (string, error) {
 	// Resolve to the PER-PLATFORM CHILD MANIFEST digest and pin llb.Image to
 	// name@<child-digest>. This is the only unambiguous way to make each platform leg
@@ -702,7 +702,7 @@ func platformLabel(p ocispecs.Platform) string {
 // are the PER-PLATFORM digest-pinned image refs resolved by the caller (see
 // resolvePlatformRefNBF); using them — instead of the raw tag in in.builderImage /
 // in.lifecycleImage — guarantees each platform leg runs its OWN architecture's builder
-// and lifecycle binaries (PLATFORM-1662 FR-8b).
+// and lifecycle binaries (PLATFORM-1802 FR-8b).
 //
 // It composes the two segments the extension multi-solve model needs (design.md
 // "Multi-solve execution model"): buildEmitThroughGeneratorLLB (base setup … analyzer,
@@ -776,7 +776,7 @@ func buildEmitThroughGeneratorLLB(in nativeBuildInputs, p ocispecs.Platform, bui
 	// child image (extraBuildpackRefs are already pinned to the p-arch child digest by the
 	// caller) and COPY its /cnb/buildpacks over the builder's before detect. This adds new
 	// modules and OVERRIDES same-id/version ones, and — crucially — gives EACH
-	// architecture its OWN arch-matching buildpack binaries (PLATFORM-1662 FR-8b), unlike
+	// architecture its OWN arch-matching buildpack binaries (PLATFORM-1802 FR-8b), unlike
 	// staging a single host-arch tree onto every leg. Copying (vs mounting) is
 	// intentional: the modules must persist through the detect/build RUNs. These only
 	// mutate the transient builder state; the final image is assembled FROM the run image.
