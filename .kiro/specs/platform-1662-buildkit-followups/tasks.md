@@ -4,14 +4,15 @@ How to look up the build data: steering `platform-1662-benchmark-data.md`. How t
 the fork image: steering `fork-release-process.md`. This spec is the single source of truth
 (the former `FOLLOWUPS.md` is retired).
 
-> **▶ There is exactly ONE current task: Task 7 (flatten the ephemeral builder).** Do it,
-> publish a new fork pack image on `buildkit-native-export-with-history-and-kiro`, then hand
-> back for testing. All other tasks below are reference (done / WON'T FIX / deferred /
-> Jenkins-library-owned) — do NOT action them unless explicitly asked.
+> **STATUS (2026-09): Task 7 (FR-7) and Task 8b-impl (FR-8b) are FIXED + VALIDATED.** Both
+> fork changes are implemented, published on `buildkit-native-export-with-history-and-kiro`,
+> and validated end-to-end: all four pd-sample buildkit-emulation builds succeed multi-arch
+> (nodejs exercised FR-7, python exercised FR-8b). Remaining: Task 7 AC-2 (flatten unit test).
+> Other tasks are reference (done / WON'T FIX / deferred / Jenkins-library-owned).
 
-## ▶ CURRENT REQUIRED TASK
+## FIXED + VALIDATED
 
-## Task 7: Flatten the ephemeral builder so extra buildpacks don't exceed the layer cap (Item 7, BLOCKER)
+## Task 7: Flatten the ephemeral builder so extra buildpacks don't exceed the layer cap (Item 7, BLOCKER — FIXED + VALIDATED)
 - [x] Reproduce: `pack build --build-backend buildkit --builder <deep noble builder>
       --trust-builder --buildpack docker.io/paketobuildpacks/nodejs:latest --platform
       linux/amd64 --platform linux/arm64 ...` → confirm `pack.local/builder/<hex>` load fails
@@ -31,12 +32,15 @@ the fork image: steering `fork-release-process.md`. This spec is the single sour
       `publish-pack.yml` (`--ref fork-main -f ref=buildkit-native-export-with-history-and-kiro`)
       → publishes `jericop/pack:buildkit-native-export-with-history-and-kiro` (no git tag; see
       `dot-kiro-files/publish-images-runbook.md` section 3A). Record the pushed image tag/digest HERE:
-      - fix commit: `f8d9eca4` (pushed to origin/buildkit-native-export-with-history-and-kiro)
+      - fix commit: `f8d9eca4`; latest branch head `474ee122` (adds FR-8b-impl)
       - published image: `docker.io/jericop/pack:buildkit-native-export-with-history-and-kiro`
-      - digest: `(pending publish-pack.yml run 33667638490 — https://github.com/jericop/pack/actions/runs/33667638490)`
-- [ ] AC-4 (handoff/test — in jenkins-core-shared-libraries, not here): point
-      `env.PACK_FORK_IMAGE` at the new image and re-run the nodejs emulation build to confirm
-      the fix end to end
+      - digest: `sha256:528801ce0d3d7188346b3ac29fcb9312096883fa007a6e6690f1a920d54e1398`
+        (republished 2026-09-07 via publish-pack.yml run 33798777006; bundled builder
+        `sha256:fc0c3bf6...`, lifecycle `sha256:5996c065...`)
+- [x] AC-4 (handoff/test): VALIDATED end-to-end — with the fork images published on
+      `buildkit-native-export-with-history-and-kiro`, the nodejs emulation build (which
+      triggered `max depth exceeded`) now builds SUCCESS multi-arch (2026-09-07, ~6510s,
+      pd-sample-nodejs-app buildkit-emulation #7). All four pd-sample emulation builds green.
 - Do NOT: squash the final app image (export is never reached), chmod, or tweak daemon
   storage — the fix is the builder-image layer count.
 - References: FR-7 (see requirements.md "Current required task"), design.md "CURRENT
@@ -71,6 +75,44 @@ staged once from the host arch and copied to both legs; now classified + deliver
 - [x] Unit tests: `moduleIsPlatformAgnostic` classification (empty/wildcard/concrete targets);
       single-manifest ⇒ agnostic; index-missing-platform ⇒ error
 - References: FR-8b-impl (requirements.md), design.md "Item 8b-impl"
+
+## Task 10: Image extension support on the buildkit backend (Item 10)
+Full-parity extension support (generate + extend-build + extend-run), kaniko-free via a
+hand-rolled restricted Dockerfile→LLB translator. Specified in full in its own spec —
+`.kiro/specs/buildkit-extension-support/` — which carries the detailed tasks.
+
+STATUS (2026-09): code implemented + unit-tested (translator, discovery, generator,
+extend-build, extend-run, ephemeral-builder skip) AND locally validated multi-arch on
+BOTH arches (linux/amd64 + linux/arm64) on `buildkit-native-export-with-history-and-kiro`;
+build+vet+unit-tests green and the local MVP (AC-1..3) passed on both arches. PENDING:
+CI integration tests (NFR-3, later follow-up), and Stage-2 sub-features (run-image SWITCH,
+context.build mounting).
+
+Three runtime issues were found + fixed during local validation (build+vet+unit-test green
+after each): (1) generation was wired as a separate `/cnb/lifecycle/generator` binary (which
+doesn't exist) — fixed to run generation inside the detector via its `-generated` flag; (2)
+in the extensions-only case pack never wrote an order.toml with `[[order-extensions]]` — fixed
+`buildMultiPlatform` to emit order.toml (builder default `[[order]]` + resolved
+`[[order-extensions]]`) whenever extensions are present; (3) the bundled lifecycle restorer
+tried kaniko-based run-image extension (`mkdir /kaniko` → permission denied) — fixed by
+resetting `analyzed.toml [run-image].extend=false` before the restorer on the buildkit path,
+since run.Dockerfile is applied in LLB (Task 5), not by the lifecycle.
+
+Track here:
+- [x] Restricted Dockerfile→LLB translator (10-instruction subset; reject others) + unit tests
+- [x] Shared generated-layout discovery helper (reused by daemon + buildkit) + unit tests
+- [x] Generator phase in LLB; deliver /cnb/extensions per-arch (reuse FR-8b classification)
+- [x] Extend-build in LLB (build.Dockerfile → builder state before builder phase) — note:
+      context.build folder mounting deferred (Stage-2)
+- [x] Extend-run in LLB (run.Dockerfile → run-image state through emit/finalize per arch) —
+      note: PATCH implemented; run-image SWITCH deferred (Stage-2)
+- [x] Revisit `skipEphemeralBuilderSave` daemon fallback for buildkit + extensions
+- [x] Local multi-arch MVP validation — PASSED on both arches (linux/amd64 + linux/arm64):
+      AC-1 generate both legs, AC-2 run.Dockerfile PATCH marker present both arches, AC-3
+      build.Dockerfile tool both arches, finalized 2-arch manifest list; CI integration later
+- [x] After done: update this spec's FR-10 status, THEN flip buildkit-native-export Req 12.7/13.8
+      (the flip was done)
+- References: FR-10 (requirements.md), spec `buildkit-extension-support`
 
 ---
 
@@ -135,7 +177,7 @@ as `permission denied` on the emulated arch) but fix + VERIFY each individually.
       issue remains after ownership is corrected)
 - References: FR-6 (6a/6b)
 
-## Task 8: QEMU emulation issues — 8a document, 8b investigate (Item 8, ENVIRONMENT / OPEN)
+## Task 8: QEMU emulation issues — 8a document (environment), 8b FIXED (Item 8)
 
 ### Task 8a: Document cgo/gcc segfault under emulation (environment; NOT a fork bug)
 - [ ] Document as a known emulation limitation (fork docs / RFC): emulated `gcc`/cgo can
@@ -143,28 +185,27 @@ as `permission denied` on the emulated arch) but fix + VERIFY each individually.
 - [ ] Note mitigations: `CGO_ENABLED=0` for pure-Go; native multi-agent for cgo/native
       workloads; optionally newer QEMU/binfmt in the builder image
 
-### Task 8b: Investigate cpython `python3` ENOENT on emulated arm64 (OPEN — root cause UNCONFIRMED)
-- [ ] DO NOT categorize as native-compile or as a fork bug yet. Correction on record:
-      CPython 3.11.15 arm64 noble is PREBUILT in the cpython `buildpack.toml` (extracted, not
-      compiled), so the earlier "source-compile under QEMU" explanation is wrong.
-- [ ] Get evidence: `BP_LOG_LEVEL=DEBUG` emulation re-run of agent-patcher-service; capture
-      the cpython buildpack output (extract vs any compile) and `file` + `readlink -f` on
-      `/layers/paketo-buildpacks_cpython/cpython/bin/python3` and `.../bin/python3.11` (arm64).
-      (jenkins-asgard console is MCP-unreadable; Tempo has no pack stdout — capture from the build.)
-- [ ] Answer the divergence: compare the resolved CPython version + stack (and buildpack
-      order) between agent-patcher-service and pd-sample-python-app (same builder + buildpack,
-      one fails one succeeds → likely an input difference)
-- [ ] Decide the bucket from evidence: H1 emulated cpython buildpack Go binary mis-extracts /
-      mis-symlinks `bin/python3 -> python3.11`; H2 fork buildkit cross-arch layer/extraction
-      issue (would make it a fork task); H3 per-app version/stack difference
-- [ ] Record: FR-7/flatten is NOT implicated (build reaches the buildpack `builder` phase)
-- References: FR-8 (8a/8b)
+### Task 8b: cpython `python3` ENOENT on emulated arm64 — FIXED (superseded by Task 8b-impl)
+- [x] Root cause CONFIRMED (was hypothesis H2): the fork's buildkit backend delivered
+      wrong-arch extra-buildpack content — one host-arch tree copied to both legs — so the
+      emulated leg ran the wrong-arch cpython `python3`. NOT a CPython source-compile (H1
+      ruled out) and NOT emulation-only.
+- [x] Fixed by Task 8b-impl / FR-8b-impl (per-arch multi-arch image child pull + staged-once
+      platform-agnostic/inline buildpacks, classified by `Descriptor().Targets()`).
+- [x] Validated: pd-sample-python-app builds SUCCESS multi-arch on emulation (previously
+      blocked); agent-patcher-service verified end-to-end (arm64 leg `GOARCH=arm64`,
+      `pip --version` ok both legs).
+- References: FR-8 (8a environment; 8b via FR-8b-impl), Task 8b-impl
 
-## Task 9: Re-run the PLATFORM-1662 comparison after 6 & 7 land
-- [ ] With Items 6 & 7 fixed, re-run the emulation builds for nodejs + python apps and
-      capture durations from Grafana (see steering `platform-1662-benchmark-data.md`)
-- [ ] Update the comparison table (add the newly-unblocked languages) in the Rapid7
-      PLATFORM-1662 spec/ticket
+## Task 9: Re-run the PLATFORM-1662 comparison after 7 & 8b land
+- [x] With FR-7 + FR-8b fixed and the fork images republished, re-ran all four pd-sample
+      emulation builds (2026-09-07): go 926s, java 510s, python 1752s, nodejs 6510s — ALL
+      SUCCESS multi-arch. Results captured in
+      `dot-kiro-files/PLATFORM-1662-fr8b-fr9-validation-commit-msg.md`.
+- [ ] Update the comparison table in the Rapid7 PLATFORM-1662 spec/ticket with these numbers
+      (note: higher than the earlier baseline — run-to-run variance + cold cache after a fresh
+      image publish; re-measure before any cost decision). Also note nodejs still carries the
+      FR-9 post-emit stall.
 - References: NFR-2
 
 ## Task 10: Investigate the post-emit stall after `exporter (emit-mode) DONE` (Item 9, OPEN — perf)

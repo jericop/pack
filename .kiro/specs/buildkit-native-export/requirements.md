@@ -394,9 +394,15 @@ dropped.
    is a design decision. (IMPLEMENTED — REJECTED as an unsupported capability; see
    Requirement 13, `BackendCapabilities.SupportsHostVolumes = false`, with a message
    directing read-only config/secret users to `--binding`.)
-7. Order-defined EXTENSIONS (Dockerfiles / extender / kaniko) are NOT supported by
-   this backend and SHALL be documented as such (the buildkit path runs a fixed
-   analyzer/detector/builder/exporter with no extender). (DOCUMENTED — out of scope.)
+7. Order-defined EXTENSIONS (generation + build-image and run-image extend) ARE
+   supported by this backend, implemented natively in LLB WITHOUT kaniko: a restricted
+   Dockerfile→LLB translator (the CNB 10-instruction subset) applies the generated
+   build.Dockerfile/run.Dockerfile per platform inside the emit graph, with the
+   generator phase run between detector and restorer. (IMPLEMENTED — code + unit tests,
+   build+vet green, and locally validated multi-arch on linux/amd64 + linux/arm64
+   (AC-1..AC-3 green); see spec `buildkit-extension-support`. Run-image PATCH implemented;
+   run-image SWITCH and context.build/context folder mounting are tracked Stage-2
+   follow-ups. CI integration tests are a later follow-up and remain PENDING.)
 
 Intentionally N/A on this publish-only, registry-export backend (NOT gaps):
 `-daemon` and docker-socket access, load-to-local-daemon, the launch cache (only
@@ -549,11 +555,16 @@ The buildkit-native fix injects the resolved modules into the builder over LLB
    as such: on the daemon it only selects the single-container creator vs the 5-phase
    flow, and the buildkit backend always runs its own fixed 5-phase emit flow (no
    creator), so the flag has no effect to honor or reject. (DOCUMENTED.)
-8. `--extension` (order-defined image extensions) remains UNSUPPORTED on the buildkit
-   backend and SHALL be documented as such: extensions require the extender/kaniko
-   phase, which this backend does not run (it executes a fixed
-   analyzer→detector→builder→exporter). This is a tracked follow-up, consistent with
-   Requirement 12's extensions note. (DOCUMENTED — out of scope.)
+8. `--extension` (order-defined image extensions) IS supported on the buildkit
+   backend, implemented natively in LLB without kaniko: the backend stages
+   /cnb/extensions per-arch, runs the lifecycle generator, and applies the generated
+   build.Dockerfile (extend-build, before the builder phase) and run.Dockerfile
+   (extend-run, into the run-image state) by translating the CNB-allowed Dockerfile
+   subset to LLB, consistent with Requirement 12's extensions item. (IMPLEMENTED — code
+   + unit tests, build+vet green, and locally validated multi-arch on linux/amd64 +
+   linux/arm64 (AC-1..AC-3 green); see spec `buildkit-extension-support`. Run-image PATCH
+   done; run-image SWITCH and context.build mounting are Stage-2 follow-ups; CI integration
+   tests are a later follow-up and remain PENDING.)
 
 ### Requirement 10: Self-healing (DEFERRED — after MVP)
 

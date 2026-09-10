@@ -1,0 +1,401 @@
+{
+  "pbtResults": {},
+  "executionHistory": {
+    "New `internal/build/multiplatform/dockerfile_llb.go`: `parseExtensionDockerfile` accepts": [
+      {
+        "executionId": "522bbfcf-8c9d-4137-86a8-8197753bb24a",
+        "chatSessionId": "sess_1bcace21-3c85-432c-a35d-621125797bb4",
+        "timestamp": 1788801105516
+      },
+      {
+        "executionId": "522bbfcf-8c9d-4137-86a8-8197753bb24a",
+        "chatSessionId": "sess_1bcace21-3c85-432c-a35d-621125797bb4",
+        "timestamp": 1788801139429
+      },
+      {
+        "executionId": "4b1eb6be-7626-4452-b63c-2a63a7928fbb",
+        "chatSessionId": "sess_1bcace21-3c85-432c-a35d-621125797bb4",
+        "timestamp": 1789003381747
+      },
+      {
+        "executionId": "4b1eb6be-7626-4452-b63c-2a63a7928fbb",
+        "chatSessionId": "sess_1bcace21-3c85-432c-a35d-621125797bb4",
+        "timestamp": 1789003387434
+      }
+    ],
+    "`toLLB(extendInput)`: FROM→base, RUN→Run, COPY/ADD→File(Copy from contextSrc), ENV/ARG→env,": [
+      {
+        "executionId": "522bbfcf-8c9d-4137-86a8-8197753bb24a",
+        "chatSessionId": "sess_1bcace21-3c85-432c-a35d-621125797bb4",
+        "timestamp": 1788801105744
+      },
+      {
+        "executionId": "4b1eb6be-7626-4452-b63c-2a63a7928fbb",
+        "chatSessionId": "sess_1bcace21-3c85-432c-a35d-621125797bb4",
+        "timestamp": 1789003395250
+      },
+      {
+        "executionId": "4b1eb6be-7626-4452-b63c-2a63a7928fbb",
+        "chatSessionId": "sess_1bcace21-3c85-432c-a35d-621125797bb4",
+        "timestamp": 1789003401256
+      }
+    ],
+    "Build-arg substitution: base_image, build_id (UUID), user_id, group_id, extend-config.toml kv": [
+      {
+        "executionId": "522bbfcf-8c9d-4137-86a8-8197753bb24a",
+        "chatSessionId": "sess_1bcace21-3c85-432c-a35d-621125797bb4",
+        "timestamp": 1788801105796
+      },
+      {
+        "executionId": "4b1eb6be-7626-4452-b63c-2a63a7928fbb",
+        "chatSessionId": "sess_1bcace21-3c85-432c-a35d-621125797bb4",
+        "timestamp": 1789003407255
+      },
+      {
+        "executionId": "4b1eb6be-7626-4452-b63c-2a63a7928fbb",
+        "chatSessionId": "sess_1bcace21-3c85-432c-a35d-621125797bb4",
+        "timestamp": 1789003412965
+      }
+    ],
+    "Unit tests `dockerfile_llb_test.go` (AC-4 + substitution + context selection). build+vet+test": [
+      {
+        "executionId": "522bbfcf-8c9d-4137-86a8-8197753bb24a",
+        "chatSessionId": "sess_1bcace21-3c85-432c-a35d-621125797bb4",
+        "timestamp": 1788801105853
+      },
+      {
+        "executionId": "4b1eb6be-7626-4452-b63c-2a63a7928fbb",
+        "chatSessionId": "sess_1bcace21-3c85-432c-a35d-621125797bb4",
+        "timestamp": 1789003419316
+      },
+      {
+        "executionId": "4b1eb6be-7626-4452-b63c-2a63a7928fbb",
+        "chatSessionId": "sess_1bcace21-3c85-432c-a35d-621125797bb4",
+        "timestamp": 1789003425435
+      }
+    ],
+    "New `internal/build/generated_layout.go`: `DiscoverGeneratedLayout(generatedDir)` returns": [
+      {
+        "executionId": "522bbfcf-8c9d-4137-86a8-8197753bb24a",
+        "chatSessionId": "sess_1bcace21-3c85-432c-a35d-621125797bb4",
+        "timestamp": 1788801105904
+      },
+      {
+        "executionId": "4b1eb6be-7626-4452-b63c-2a63a7928fbb",
+        "chatSessionId": "sess_1bcace21-3c85-432c-a35d-621125797bb4",
+        "timestamp": 1789003432480
+      },
+      {
+        "executionId": "4b1eb6be-7626-4452-b63c-2a63a7928fbb",
+        "chatSessionId": "sess_1bcace21-3c85-432c-a35d-621125797bb4",
+        "timestamp": 1789003438031
+      }
+    ],
+    "Refactor daemon `hasExtensionsForBuild`/`hasExtensionsForRun` to call it (behavior preserved;": [
+      {
+        "executionId": "522bbfcf-8c9d-4137-86a8-8197753bb24a",
+        "chatSessionId": "sess_1bcace21-3c85-432c-a35d-621125797bb4",
+        "timestamp": 1788801105959
+      },
+      {
+        "executionId": "4b1eb6be-7626-4452-b63c-2a63a7928fbb",
+        "chatSessionId": "sess_1bcace21-3c85-432c-a35d-621125797bb4",
+        "timestamp": 1789003444791
+      },
+      {
+        "executionId": "4b1eb6be-7626-4452-b63c-2a63a7928fbb",
+        "chatSessionId": "sess_1bcace21-3c85-432c-a35d-621125797bb4",
+        "timestamp": 1789003450511
+      }
+    ],
+    "Unit tests for discovery (build-only, run-only, both, none; old `generated/build/<bp>` +": [
+      {
+        "executionId": "522bbfcf-8c9d-4137-86a8-8197753bb24a",
+        "chatSessionId": "sess_1bcace21-3c85-432c-a35d-621125797bb4",
+        "timestamp": 1788801106005
+      },
+      {
+        "executionId": "4b1eb6be-7626-4452-b63c-2a63a7928fbb",
+        "chatSessionId": "sess_1bcace21-3c85-432c-a35d-621125797bb4",
+        "timestamp": 1789003456284
+      },
+      {
+        "executionId": "4b1eb6be-7626-4452-b63c-2a63a7928fbb",
+        "chatSessionId": "sess_1bcace21-3c85-432c-a35d-621125797bb4",
+        "timestamp": 1789003461839
+      }
+    ],
+    "`buildEmitLLB`: when order has extensions + platformAPI>=0.13, add": [
+      {
+        "executionId": "522bbfcf-8c9d-4137-86a8-8197753bb24a",
+        "chatSessionId": "sess_1bcace21-3c85-432c-a35d-621125797bb4",
+        "timestamp": 1788801106060
+      },
+      {
+        "executionId": "4b1eb6be-7626-4452-b63c-2a63a7928fbb",
+        "chatSessionId": "sess_1bcace21-3c85-432c-a35d-621125797bb4",
+        "timestamp": 1789003468136
+      },
+      {
+        "executionId": "4b1eb6be-7626-4452-b63c-2a63a7928fbb",
+        "chatSessionId": "sess_1bcace21-3c85-432c-a35d-621125797bb4",
+        "timestamp": 1789003474518
+      }
+    ],
+    "Deliver extension modules to /cnb/extensions per-arch using the FR-8b classification": [
+      {
+        "executionId": "522bbfcf-8c9d-4137-86a8-8197753bb24a",
+        "chatSessionId": "sess_1bcace21-3c85-432c-a35d-621125797bb4",
+        "timestamp": 1788801106115
+      },
+      {
+        "executionId": "4b1eb6be-7626-4452-b63c-2a63a7928fbb",
+        "chatSessionId": "sess_1bcace21-3c85-432c-a35d-621125797bb4",
+        "timestamp": 1789003481640
+      },
+      {
+        "executionId": "4b1eb6be-7626-4452-b63c-2a63a7928fbb",
+        "chatSessionId": "sess_1bcace21-3c85-432c-a35d-621125797bb4",
+        "timestamp": 1789003487499
+      }
+    ],
+    "`nativeBuildInputs` + backend wiring gain extension inputs (generated dir, ext image refs,": [
+      {
+        "executionId": "522bbfcf-8c9d-4137-86a8-8197753bb24a",
+        "chatSessionId": "sess_1bcace21-3c85-432c-a35d-621125797bb4",
+        "timestamp": 1788801106156
+      },
+      {
+        "executionId": "4b1eb6be-7626-4452-b63c-2a63a7928fbb",
+        "chatSessionId": "sess_1bcace21-3c85-432c-a35d-621125797bb4",
+        "timestamp": 1789003493762
+      },
+      {
+        "executionId": "4b1eb6be-7626-4452-b63c-2a63a7928fbb",
+        "chatSessionId": "sess_1bcace21-3c85-432c-a35d-621125797bb4",
+        "timestamp": 1789003501273
+      }
+    ],
+    "After generate, discover build Dockerfiles; translate→LLB applied to the builder state": [
+      {
+        "executionId": "522bbfcf-8c9d-4137-86a8-8197753bb24a",
+        "chatSessionId": "sess_1bcace21-3c85-432c-a35d-621125797bb4",
+        "timestamp": 1788801106204
+      },
+      {
+        "executionId": "4b1eb6be-7626-4452-b63c-2a63a7928fbb",
+        "chatSessionId": "sess_1bcace21-3c85-432c-a35d-621125797bb4",
+        "timestamp": 1789003508984
+      },
+      {
+        "executionId": "4b1eb6be-7626-4452-b63c-2a63a7928fbb",
+        "chatSessionId": "sess_1bcace21-3c85-432c-a35d-621125797bb4",
+        "timestamp": 1789003515400
+      }
+    ],
+    "Supply base_image/build_id/user_id/group_id (user/group from builder image config) +": [
+      {
+        "executionId": "522bbfcf-8c9d-4137-86a8-8197753bb24a",
+        "chatSessionId": "sess_1bcace21-3c85-432c-a35d-621125797bb4",
+        "timestamp": 1788801106258
+      },
+      {
+        "executionId": "4b1eb6be-7626-4452-b63c-2a63a7928fbb",
+        "chatSessionId": "sess_1bcace21-3c85-432c-a35d-621125797bb4",
+        "timestamp": 1789003521607
+      },
+      {
+        "executionId": "4b1eb6be-7626-4452-b63c-2a63a7928fbb",
+        "chatSessionId": "sess_1bcace21-3c85-432c-a35d-621125797bb4",
+        "timestamp": 1789003528181
+      }
+    ],
+    "Discover run Dockerfiles; translate→LLB applied to the run-image state (patch or FROM-switch)": [
+      {
+        "executionId": "522bbfcf-8c9d-4137-86a8-8197753bb24a",
+        "chatSessionId": "sess_1bcace21-3c85-432c-a35d-621125797bb4",
+        "timestamp": 1788801106311
+      },
+      {
+        "executionId": "4b1eb6be-7626-4452-b63c-2a63a7928fbb",
+        "chatSessionId": "sess_1bcace21-3c85-432c-a35d-621125797bb4",
+        "timestamp": 1789003535091
+      },
+      {
+        "executionId": "4b1eb6be-7626-4452-b63c-2a63a7928fbb",
+        "chatSessionId": "sess_1bcace21-3c85-432c-a35d-621125797bb4",
+        "timestamp": 1789003541301
+      }
+    ],
+    "Carry the extended run image + extImageConfig (esp. io.buildpacks.rebasable) through the": [
+      {
+        "executionId": "522bbfcf-8c9d-4137-86a8-8197753bb24a",
+        "chatSessionId": "sess_1bcace21-3c85-432c-a35d-621125797bb4",
+        "timestamp": 1788801106370
+      },
+      {
+        "executionId": "4b1eb6be-7626-4452-b63c-2a63a7928fbb",
+        "chatSessionId": "sess_1bcace21-3c85-432c-a35d-621125797bb4",
+        "timestamp": 1789003546991
+      },
+      {
+        "executionId": "4b1eb6be-7626-4452-b63c-2a63a7928fbb",
+        "chatSessionId": "sess_1bcace21-3c85-432c-a35d-621125797bb4",
+        "timestamp": 1789003552460
+      }
+    ],
+    "build+vet": [
+      {
+        "executionId": "522bbfcf-8c9d-4137-86a8-8197753bb24a",
+        "chatSessionId": "sess_1bcace21-3c85-432c-a35d-621125797bb4",
+        "timestamp": 1788801106435
+      },
+      {
+        "executionId": "4b1eb6be-7626-4452-b63c-2a63a7928fbb",
+        "chatSessionId": "sess_1bcace21-3c85-432c-a35d-621125797bb4",
+        "timestamp": 1789003558395
+      },
+      {
+        "executionId": "4b1eb6be-7626-4452-b63c-2a63a7928fbb",
+        "chatSessionId": "sess_1bcace21-3c85-432c-a35d-621125797bb4",
+        "timestamp": 1789003564379
+      }
+    ],
+    "Once LLB drives generate+extend, stop forcing the daemon ephemeral-builder synthesis for": [
+      {
+        "executionId": "522bbfcf-8c9d-4137-86a8-8197753bb24a",
+        "chatSessionId": "sess_1bcace21-3c85-432c-a35d-621125797bb4",
+        "timestamp": 1788801106489
+      },
+      {
+        "executionId": "4b1eb6be-7626-4452-b63c-2a63a7928fbb",
+        "chatSessionId": "sess_1bcace21-3c85-432c-a35d-621125797bb4",
+        "timestamp": 1789003571522
+      },
+      {
+        "executionId": "4b1eb6be-7626-4452-b63c-2a63a7928fbb",
+        "chatSessionId": "sess_1bcace21-3c85-432c-a35d-621125797bb4",
+        "timestamp": 1789003577216
+      }
+    ],
+    "Synthetic extension: run.Dockerfile (patch: add a file / RUN) + build.Dockerfile (install a tool)": [
+      {
+        "executionId": "522bbfcf-8c9d-4137-86a8-8197753bb24a",
+        "chatSessionId": "sess_1bcace21-3c85-432c-a35d-621125797bb4",
+        "timestamp": 1788801106541
+      },
+      {
+        "executionId": "4b1eb6be-7626-4452-b63c-2a63a7928fbb",
+        "chatSessionId": "sess_1bcace21-3c85-432c-a35d-621125797bb4",
+        "timestamp": 1789003586747
+      },
+      {
+        "executionId": "4b1eb6be-7626-4452-b63c-2a63a7928fbb",
+        "chatSessionId": "sess_1bcace21-3c85-432c-a35d-621125797bb4",
+        "timestamp": 1789007312693
+      }
+    ],
+    "Build multi-arch (linux/amd64 + linux/arm64) against the LOCAL registry with the fork pack;": [
+      {
+        "executionId": "522bbfcf-8c9d-4137-86a8-8197753bb24a",
+        "chatSessionId": "sess_1bcace21-3c85-432c-a35d-621125797bb4",
+        "timestamp": 1788801106587
+      },
+      {
+        "executionId": "4b1eb6be-7626-4452-b63c-2a63a7928fbb",
+        "chatSessionId": "sess_1bcace21-3c85-432c-a35d-621125797bb4",
+        "timestamp": 1789007318093
+      },
+      {
+        "executionId": "4b1eb6be-7626-4452-b63c-2a63a7928fbb",
+        "chatSessionId": "sess_1bcace21-3c85-432c-a35d-621125797bb4",
+        "timestamp": 1789007323280
+      }
+    ],
+    "Confirm: generator runs both legs; run-image change present both arches; build-tool available": [
+      {
+        "executionId": "522bbfcf-8c9d-4137-86a8-8197753bb24a",
+        "chatSessionId": "sess_1bcace21-3c85-432c-a35d-621125797bb4",
+        "timestamp": 1788801106653
+      },
+      {
+        "executionId": "4b1eb6be-7626-4452-b63c-2a63a7928fbb",
+        "chatSessionId": "sess_1bcace21-3c85-432c-a35d-621125797bb4",
+        "timestamp": 1789007329547
+      },
+      {
+        "executionId": "4b1eb6be-7626-4452-b63c-2a63a7928fbb",
+        "chatSessionId": "sess_1bcace21-3c85-432c-a35d-621125797bb4",
+        "timestamp": 1789007336272
+      }
+    ],
+    "Ensure translator + discovery unit tests are complete and green (build+vet+test)": [
+      {
+        "executionId": "522bbfcf-8c9d-4137-86a8-8197753bb24a",
+        "chatSessionId": "sess_1bcace21-3c85-432c-a35d-621125797bb4",
+        "timestamp": 1788801106713
+      },
+      {
+        "executionId": "4b1eb6be-7626-4452-b63c-2a63a7928fbb",
+        "chatSessionId": "sess_1bcace21-3c85-432c-a35d-621125797bb4",
+        "timestamp": 1789007342710
+      },
+      {
+        "executionId": "4b1eb6be-7626-4452-b63c-2a63a7928fbb",
+        "chatSessionId": "sess_1bcace21-3c85-432c-a35d-621125797bb4",
+        "timestamp": 1789007348549
+      }
+    ],
+    "Note integration tests as a later follow-up (NFR-3)": [
+      {
+        "executionId": "522bbfcf-8c9d-4137-86a8-8197753bb24a",
+        "chatSessionId": "sess_1bcace21-3c85-432c-a35d-621125797bb4",
+        "timestamp": 1788801106763
+      },
+      {
+        "executionId": "4b1eb6be-7626-4452-b63c-2a63a7928fbb",
+        "chatSessionId": "sess_1bcace21-3c85-432c-a35d-621125797bb4",
+        "timestamp": 1789007353716
+      },
+      {
+        "executionId": "4b1eb6be-7626-4452-b63c-2a63a7928fbb",
+        "chatSessionId": "sess_1bcace21-3c85-432c-a35d-621125797bb4",
+        "timestamp": 1789007359008
+      }
+    ],
+    "Mark the extension follow-up (FR to be added there) as implemented + locally validated;": [
+      {
+        "executionId": "522bbfcf-8c9d-4137-86a8-8197753bb24a",
+        "chatSessionId": "sess_1bcace21-3c85-432c-a35d-621125797bb4",
+        "timestamp": 1788801106867
+      },
+      {
+        "executionId": "4b1eb6be-7626-4452-b63c-2a63a7928fbb",
+        "chatSessionId": "sess_1bcace21-3c85-432c-a35d-621125797bb4",
+        "timestamp": 1789007366995
+      },
+      {
+        "executionId": "4b1eb6be-7626-4452-b63c-2a63a7928fbb",
+        "chatSessionId": "sess_1bcace21-3c85-432c-a35d-621125797bb4",
+        "timestamp": 1789007544041
+      }
+    ],
+    "Only after platform-1662 spec is updated: change Req 12.7 + Req 13.8 from": [
+      {
+        "executionId": "522bbfcf-8c9d-4137-86a8-8197753bb24a",
+        "chatSessionId": "sess_1bcace21-3c85-432c-a35d-621125797bb4",
+        "timestamp": 1788801106941
+      },
+      {
+        "executionId": "4b1eb6be-7626-4452-b63c-2a63a7928fbb",
+        "chatSessionId": "sess_1bcace21-3c85-432c-a35d-621125797bb4",
+        "timestamp": 1789007550531
+      },
+      {
+        "executionId": "4b1eb6be-7626-4452-b63c-2a63a7928fbb",
+        "chatSessionId": "sess_1bcace21-3c85-432c-a35d-621125797bb4",
+        "timestamp": 1789007556455
+      }
+    ]
+  }
+}

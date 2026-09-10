@@ -20,14 +20,21 @@ open. This spec consolidates ALL of them (including the ones marked WON'T FIX / 
 so the pack development work has a single source of truth for context — but only ONE of
 them is an actionable pack code change right now (see below).
 
-> **CURRENT REQUIRED TASK — the ONLY pack code change to make now: FR-7, flatten the
-> ephemeral builder (Item 7).** Everything else in this spec is reference/context:
-> Items 1/2/4 are already FIXED on this branch, Item 3 is WON'T FIX, Item 5 is DEFERRED
-> (optional), and Items 6/8 are NOT fork changes (6 is a Jenkins-library ownership fix, 8
-> is an environment/documentation note). Do FR-7, publish a new fork pack image on the
-> `buildkit-native-export-with-history-and-kiro` branch, then hand back for testing in the
-> PLATFORM-1662 pipeline. Do not start any other pack code change under this spec unless
-> explicitly asked.
+> **STATUS (2026-09): FR-7 and FR-8b are FIXED + VALIDATED.** The fork changes have been
+> implemented, unit-tested, published on the `buildkit-native-export-with-history-and-kiro`
+> branch (lifecycle + builder + pack), and validated end-to-end: all four pd-sample
+> buildkit-emulation builds succeed multi-arch (go, java, nodejs, python). nodejs exercised
+> FR-7 (extra `--buildpack` → `max depth exceeded`) and python exercised FR-8b (wrong-arch
+> extra buildpack → cpython `python3` ENOENT); both now build cleanly.
+>
+> Remaining reference/context: Items 1/2/4 already FIXED; Item 3 WON'T FIX; Item 5 DEFERRED
+> (optional); Item 6 is a Jenkins-library ownership fix (not a fork change); Item 8a is an
+> environment note (QEMU cgo/gcc segfault, mitigate with `CGO_ENABLED=0`); FR-9 (post-emit
+> stall) is the remaining OPEN perf item (now instrumented with per-arch finalize timing).
+> Item 10 (image extensions) is IMPLEMENTED AND LOCALLY VALIDATED multi-arch on both arches
+> (linux/amd64 + linux/arm64) in the dedicated spec `buildkit-extension-support`; CI integration
+> and Stage-2 (run-image SWITCH, context.build mounting) remain the only pending items. Small
+> TODO: FR-7 AC-2 (a dedicated flatten unit test) is still unchecked.
 
 This spec adds the requirements/design/tasks framing and the current status of each item.
 The `FOLLOWUPS.md` file that previously held the long-form per-item reference is being
@@ -43,23 +50,28 @@ the fork pack image on this branch.
 
 | # | Item | Severity | Status |
 |---|------|----------|--------|
-| 7 | Extra buildpacks + trusted builder → ephemeral builder `max depth exceeded` | BLOCKER | **▶ CURRENT REQUIRED TASK — flatten the builder, publish image, then test** |
+| 7 | Extra buildpacks + trusted builder → ephemeral builder `max depth exceeded` | BLOCKER | **FIXED + VALIDATED** — flatten implemented; nodejs emulation (which triggered it) now builds SUCCESS. (AC-2 flatten unit test still TODO) |
 | 1 | Empty `--buildkit-builder` resolves to non-existent `pack-multiplatform` | BLOCKER | FIXED (reference) |
 | 2 | App-context sync `changes out of order` (nested dirs + filter) | BLOCKER | FIXED (reference) |
 | 3 | Untrusted fork builder needs `--trust-builder` (lifecycle 0.0.0) | usability | WON'T FIX by decision (reference) |
 | 4 | `platform env:` one vertex per env var floods output | papercut | FIXED (reference) |
 | 5 | Repeated `DONE` lines per vertex; gate progress behind `--verbose` | papercut | DEFERRED / optional (reference) |
 | 6 | File OWNERSHIP, root-run container vs jenkins user (surfaced as `permission denied` on emulated arch). TWO related-but-separate: **6a** mvnPipeline `target/`, **6b** library-created binding files | BLOCKER | NOT a fork change — Jenkins-library fix, tracked elsewhere (reference) |
-| 8 | QEMU emulation: (8a) cgo/gcc segfault — documented, environment; (8b) cpython `python3` ENOENT → `exit code: 51` on agent-patcher-service #5 — OPEN, root cause UNCONFIRMED (CPython is prebuilt/extracted here, NOT compiled; suspect emulated buildpack Go binary or fork layer assembly — needs DEBUG evidence) | environment / OPEN | 8a document; 8b investigate (reference) |
+| 8 | QEMU emulation: (8a) cgo/gcc segfault — documented, environment; (8b) cpython `python3` ENOENT → `exit code: 51` — root cause was WRONG-ARCH extra-buildpack delivery (amd64 buildpack binaries on the arm64 leg), FIXED by FR-8b-impl | env (8a) / FIXED (8b) | 8a document (environment); **8b FIXED + VALIDATED (see FR-8b-impl)** |
 | 9 | Post-emit stall: long pause AFTER `lifecycle: exporter (emit-mode) DONE`, around run-image config resolve, before the build completes (seen on ≥2 emulation builds) | perf / OPEN | investigate — root cause UNCONFIRMED (reference) |
 | 8b-impl | Extra buildpacks (`--buildpack`/`project.toml`) delivered as ONE host-arch tree to both legs → emulated leg runs wrong-arch buildpack binaries (agent-patcher cpython `python3` SIGTRAP/ENOENT). | BLOCKER | **FIXED (verified)** — see FR-8b-impl |
+| 10 | Image EXTENSIONS unsupported on the buildkit backend (no generator/extender; extensions silently ignored / force daemon fallback) | feature gap | **IMPLEMENTED + LOCALLY VALIDATED (multi-arch, both arches; code + unit tests)** — kaniko-free LLB generate + extend-build + extend-run; see spec `buildkit-extension-support`. PENDING: CI integration (NFR-3); deferred Stage-2: run-image SWITCH, context.build mounting |
 
 ## Functional Requirements
 
-## ▶ Current required task
+## Fixed + validated pack code changes (FR-7, FR-8b-impl)
 
 ### FR-7 (Item 7): flatten the ephemeral builder so extra buildpacks don't blow the layer cap
-**This is the only pack code change to make now.**
+**Status: FIXED + VALIDATED.** Implemented (flatten the added builder modules into a single
+layer), published on `buildkit-native-export-with-history-and-kiro`, and validated: the
+nodejs emulation build — which adds `--buildpack paketobuildpacks/nodejs` and originally hit
+`max depth exceeded` — now builds SUCCESS multi-arch. Remaining TODO: AC-2 (a dedicated
+regression unit test asserting the flattened, O(1)-layer invariant).
 
 **Symptom (verified).** With `--build-backend buildkit` and an extra buildpack module on a
 TRUSTED builder — e.g. the nodejs app passes
@@ -219,12 +231,15 @@ PLATFORM-1662 branches). The `jericop/pack` fork needs NO change for Item 6 (re-
 only if a genuine binding-permission issue remains after ownership is corrected). Tracked
 here for completeness of the PLATFORM-1662 findings.
 
-### FR-7 — see "Current required task" above
-FR-7 is the current required task and is specified in full at the top of this section.
+### FR-7 — FIXED + VALIDATED
+See the "Fixed + validated pack code changes" section above. FR-7 (flatten the ephemeral
+builder) is implemented, published, and validated by the nodejs emulation build (which
+triggered `max depth exceeded`) now succeeding. Remaining: AC-2 flatten unit test.
 
-### FR-8 (Item 8): QEMU-emulation instability — cgo/gcc segfault (documented) + cpython python3 ENOENT (OPEN, root cause UNCONFIRMED)
-This item now covers TWO distinct failures. Only the first is understood; the second is
-OPEN and must NOT be asserted as a native-compile issue (see the correction note).
+### FR-8 (Item 8): QEMU-emulation cgo/gcc segfault (8a, documented/environment) + cpython python3 ENOENT (8b, FIXED via FR-8b-impl)
+This item covers TWO distinct failures. 8a is an environment limitation (documented). 8b is
+FIXED: its root cause turned out to be wrong-arch extra-buildpack delivery, resolved by
+FR-8b-impl (see that requirement for the fix + validation).
 
 **FR-8a (documented, environment): cgo/gcc segfault under emulation.**
 - NOT a pack code bug: under QEMU on the non-native arch, a Go+cgo build invoking an
@@ -233,48 +248,28 @@ OPEN and must NOT be asserted as a native-compile issue (see the correction note
 - Mitigations: `CGO_ENABLED=0` for pure-Go; native multi-agent for cgo/native-extension
   workloads. Optionally test a newer QEMU/binfmt in the builder image.
 
-**FR-8b (OPEN — root cause UNCONFIRMED): cpython `python3` ENOENT on emulated arm64.**
-- Observed: agent-patcher-service build #5 (2026-09-02, jenkins-asgard), emulated
-  `linux/arm64` (host is amd64):
+**FR-8b (FIXED via FR-8b-impl): cpython `python3` ENOENT on emulated arm64 was wrong-arch buildpack delivery.**
+- Originally observed on agent-patcher-service #5 (2026-09-02), emulated `linux/arm64`:
   ```
-  [linux/arm64]     Installing CPython 3.11.15
-  [linux/arm64]     pip --version failed. Run with --env BP_LOG_LEVEL=DEBUG ...
   [linux/arm64] fork/exec /layers/paketo-buildpacks_cpython/cpython/bin/python3: no such file or directory
   [linux/arm64] lifecycle: builder ERROR: process "/cnb/lifecycle/builder ..." exit code: 51
   ```
-- CORRECTION (supersedes an earlier draft of this note): this is almost certainly NOT a
-  CPython "compiled-from-source under QEMU" failure. The cpython `buildpack.toml` ships a
-  PREBUILT `arm64` CPython 3.11.15 for the noble stack
-  (`python_3.11.15_linux_arm64_noble_8116cb7d.tgz`, `stacks = ["io.buildpacks.stacks.noble"]`),
-  so postal resolves a prebuilt tarball → `dependency.URI != dependency.Source` → the
-  buildpack EXTRACTS it (`Deliver`); it does NOT run `configure`/`make`. No emulated C
-  compile happens at this step, and python itself is NOT executed by the cpython buildpack.
-- What IS running under emulation at this step is the cpython buildpack's own Go `build`
-  binary (extract + `os.Symlink` of `bin/python3 -> python3.11`, `bin/python -> python3`).
-  So the leading hypotheses for the dangling/unusable `python3` are:
-  - **H1 (leading):** the emulated buildpack Go binary mis-extracts the tarball or creates
-    a `python3` symlink whose target was not actually written → later `pip --version`
-    (pip buildpack) `fork/exec python3` returns ENOENT.
-  - **H2:** cross-arch layer/extraction issue in the fork's buildkit assembly (arm64 layer
-    gets an amd64 `python3`, or the layer doesn't materialize for the emulated platform).
-    Considered less likely (backend emits per-platform LLB) but NOT excluded without evidence.
-  - **H3:** a version/stack resolution difference specific to this app.
-- OPEN QUESTION (must be answered): why does this fail for agent-patcher-service but
-  pd-sample-python-app builds fine on the SAME builder + SAME cpython buildpack? Likely an
-  INPUT difference (resolved CPython version/stack, or buildpack order — agent-patcher-service
-  also spawns a sub-build), not the environment alone. Compare the resolved CPython
-  version/stack between the two apps.
-- STATUS: root cause UNCONFIRMED. Do NOT categorize as FR-8a (native-compile) or as a fork
-  bug until evidence exists. The only firm conclusions: (a) FR-7/flatten is NOT implicated —
-  the build reaches the buildpack `builder` phase, well past the ephemeral-builder load;
-  (b) CPython is extracted-prebuilt here, not compiled.
-- REQUIRED EVIDENCE to close this (no code change until then): a `BP_LOG_LEVEL=DEBUG`
-  emulation re-run of agent-patcher-service capturing the cpython buildpack output
-  (extract vs any compile) plus `file` and `readlink -f` on
-  `/layers/paketo-buildpacks_cpython/cpython/bin/python3` and `.../bin/python3.11` on the
-  arm64 side; and the resolved CPython version/stack for BOTH apps. Note: agent-patcher-service
-  runs on jenkins-asgard (MCP-unreadable; Tempo carries no pack stdout) — the DEBUG output
-  must be captured from the build itself.
+- ROOT CAUSE (confirmed — this was hypothesis H2): the fork's buildkit backend staged extra
+  buildpacks (`--buildpack` / project.toml) ONCE from the HOST arch and copied that same tree
+  to BOTH platform legs, so the emulated arm64 leg ran amd64 cpython buildpack binaries →
+  amd64 `python3` extracted/symlinked on the arm64 leg → `fork/exec python3` ENOENT (and, on
+  a native amd64 Jenkins host building an arm64 image, the same class of mismatch). It was
+  NOT a CPython source-compile (CPython is prebuilt/extracted) and NOT the buildpack's own Go
+  binary mis-symlinking (H1); it was wrong-arch content delivery in the fork.
+- FIX: FR-8b-impl (see that requirement) — deliver multi-arch registry buildpacks per-arch
+  (per-platform child image pull) and platform-agnostic/inline buildpacks staged-once-to-all
+  legs, classified by `Descriptor().Targets()`.
+- VALIDATION: pd-sample-python-app now builds SUCCESS multi-arch on emulation (previously
+  blocked), and agent-patcher-service was verified end-to-end (arm64 leg `GOARCH=arm64`,
+  `pip --version` succeeded on both legs, `Finalized CNB metadata for manifest list`).
+- Note on the earlier "why agent-patcher fails but pd-sample-python-app passed" question:
+  the difference was extra-buildpack usage (agent-patcher adds custom/extra buildpacks that
+  the wrong-arch path corrupted); with per-arch delivery both build cleanly.
 
 ### FR-9 (Item 9, OPEN — perf): long post-emit stall after `exporter (emit-mode) DONE`
 - OBSERVED on MULTIPLE emulation builds across languages (go, nodejs, java): after the
@@ -377,6 +372,54 @@ staging to avoid double-injection).
 `extraBuildpacksLocalName` mount). Testing note: `--buildpack` OVERRIDES the `project.toml`
 order entirely, so a descriptor-driven inline buildpack is only exercised when `--buildpack`
 is NOT passed.
+
+### FR-10 (Item 10): image extension support on the buildkit backend — IMPLEMENTED + LOCALLY VALIDATED (multi-arch)
+**Status: IMPLEMENTED and LOCALLY VALIDATED multi-arch** in the dedicated spec
+`buildkit-extension-support` (translator, shared discovery, generator phase, extend-build,
+extend-run, and the ephemeral-builder skip are all done; build+vet+unit-tests green on
+`buildkit-native-export-with-history-and-kiro`). The local multi-arch MVP is DONE: AC-1..AC-3
+are green on BOTH linux/amd64 and linux/arm64 (generate both legs, run.Dockerfile PATCH marker
+present on both arches, build.Dockerfile tool available on both arches; finalized 2-arch
+manifest list). Validation surfaced and fixed three runtime issues — generation run inside the
+detector via its `-generated` flag (not a separate `/cnb/lifecycle/generator` binary),
+`[[order-extensions]]` threaded into a written order.toml in the extensions-only case, and the
+bundled lifecycle restorer's kaniko run-image extension skipped on the buildkit path (run.Dockerfile
+is applied in LLB). PENDING: CI integration tests (NFR-3); deferred Stage-2 sub-features: run-image
+SWITCH and context.build/context folder mounting from the generate state.
+
+The buildkit backend did not support CNB image extensions: it ran a fixed
+`analyzer → detector → restorer → builder → exporter(emit)` with no generator/extender, and
+when extensions were present pack fell back to the daemon-synthesized ephemeral builder that
+the multi-arch LLB build never consumes — so extensions were effectively ignored. The
+`buildkit-native-export` spec declared this out of scope (Req 12.7 / 13.8) as a tracked
+follow-up; this is that follow-up.
+
+**Required behavior.** Add FULL-PARITY extension support to the buildkit backend — the
+generation phase plus BOTH extend phases (build image and run image) — implemented natively
+in LLB, **without kaniko**. The daemon lifecycle uses kaniko to apply extension Dockerfiles
+because it has no BuildKit; the buildkit backend already authors an LLB graph and BuildKit is
+itself a Dockerfile engine, so extension Dockerfiles are translated directly to LLB. The CNB
+image-extension spec restricts extension Dockerfiles to a fixed 10-instruction subset
+(`FROM/ADD/ARG/COPY/ENV/LABEL/RUN/SHELL/USER/WORKDIR`) that maps 1:1 onto LLB ops, so a
+hand-rolled restricted translator covers the full contract dependency-free and rejects
+anything outside the allowed set. This runs per-platform in the existing emit graph, giving
+per-arch correctness for free and dropping the daemon's kaniko volume-cache constraint.
+
+**This requirement is specified in full in its own dedicated spec:**
+`.kiro/specs/buildkit-extension-support/` (requirements + design + tasks). That spec is the
+source of truth for the mechanism, the restricted translator, the shared generated-layout
+discovery reuse seam, the phase ordering, and the acceptance criteria. This FR-10 exists so
+the PLATFORM-1662 follow-up set records it and points at that spec.
+
+**Acceptance (summary; see the dedicated spec for AC-1..AC-6):** generate runs per platform;
+a `run.Dockerfile` patch shows on the final image on both arches; a `build.Dockerfile` tool is
+available to buildpacks on both arches; disallowed instructions are rejected; a no-extension
+build emits the unchanged 5-phase graph; translator + discovery are unit-tested (integration
+tests later). Translator + discovery unit tests are DONE and green; the code-level acceptance
+(generator wired, extend-build, extend-run PATCH, no-extension path unchanged) is in place at
+build+vet. The local multi-arch MVP build (AC-1..AC-3) is DONE — green on both linux/amd64 and
+linux/arm64 (generate, run-image PATCH marker, build-tool; finalized 2-arch manifest). CI
+integration tests (NFR-3) remain PENDING.
 
 ## Non-Functional Requirements
 

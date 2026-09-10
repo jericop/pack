@@ -251,6 +251,22 @@ Testing lesson: `--buildpack` OVERRIDES the `project.toml` order (`processBuildp
 `declaredBPs := opts.Buildpacks`, only falls back to `opts.ProjectDescriptor.Build.Buildpacks`
 when empty), so a descriptor-driven inline is only exercised with NO `--buildpack`.
 
+## Item 10 — image extension support (FR-10, ▶ NEXT TASK)
+
+The buildkit backend runs a fixed `analyzer → detector → restorer → builder → exporter(emit)`
+with no generator/extender, so CNB image extensions are unsupported (and today silently force
+a daemon ephemeral-builder fallback the LLB build never consumes). The fix is full-parity
+extension support — generate + extend-build + extend-run — implemented natively in LLB with a
+hand-rolled restricted Dockerfile→LLB translator (no kaniko), because BuildKit is already a
+Dockerfile engine and the CNB extension Dockerfile grammar is a fixed 10-instruction subset
+that maps 1:1 to LLB ops. Running it per-platform in `buildEmitLLB` gives per-arch correctness
+for free and drops the daemon's kaniko volume-cache constraint.
+
+The full mechanism, translator design, shared generated-layout discovery reuse seam, phase
+ordering, and acceptance criteria live in the dedicated spec
+`.kiro/specs/buildkit-extension-support/` (requirements + design + tasks). This section is a
+pointer; do not duplicate the detail here.
+
 ## PLATFORM-1662 performance context (why this matters)
 
 For the apps that build on BOTH strategies, emulation wall-clock was ~1.2–1.4× the
