@@ -974,25 +974,15 @@ func (l *LifecycleExecution) hasExtensionsForBuild() bool {
 	if !l.hasExtensions() {
 		return false
 	}
-	generatedDir := filepath.Join(l.tmpDir, "generated")
-	fis, err := os.ReadDir(filepath.Join(generatedDir, "build"))
-	if err == nil && len(fis) > 0 {
-		// on older platforms, we need to find a file such as <layers>/generated/build/<buildpack-id>/Dockerfile
-		// on newer platforms, <layers>/generated/build doesn't exist
-		return true
-	}
-	// on newer platforms, we need to find a file such as <layers>/generated/<buildpack-id>/build.Dockerfile
-	fis, err = os.ReadDir(generatedDir)
+	// Shared discovery (used by both the daemon and buildkit paths). It handles both the
+	// older <generated>/build/<ext-id>/Dockerfile layout and the newer
+	// <generated>/<ext-id>/build.Dockerfile layout.
+	layout, err := DiscoverGeneratedLayout(filepath.Join(l.tmpDir, "generated"))
 	if err != nil {
 		l.logger.Warnf("failed to read generated directory, assuming no build image extensions: %s", err)
 		return false
 	}
-	for _, fi := range fis {
-		if _, err := os.Stat(filepath.Join(generatedDir, fi.Name(), "build.Dockerfile")); err == nil {
-			return true
-		}
-	}
-	return false
+	return layout.HasBuild()
 }
 
 func (l *LifecycleExecution) hasExtensionsForRun() bool {

@@ -110,6 +110,7 @@ type BuilderOption func(*options) error
 
 type options struct {
 	toFlatten      buildpack.FlattenModuleInfos
+	flattenAll     bool
 	labels         map[string]string
 	runImage       string
 	saveProhibited bool
@@ -181,6 +182,20 @@ func constructBuilder(img imgutil.Image, newName string, errOnMissingLabel bool,
 		}
 	}
 
+	// The added-module collection decides how AddBuildpack/AddExtension modules are
+	// grouped into image layers at Save time. When flattenAll is set, ALL added
+	// modules collapse into a SINGLE flattened group (one image layer) via the V1
+	// collection; this keeps a synthesized/ephemeral builder shallow so it stays
+	// under the daemon's layer-depth cap on a deep base builder. Otherwise the V2
+	// collection flattens only the explicitly-requested groups and explodes the
+	// rest (one layer per module).
+	newAddedModules := func() buildpack.ManagedCollection {
+		if opts.flattenAll {
+			return buildpack.NewManagedCollectionV1(true)
+		}
+		return buildpack.NewManagedCollectionV2(opts.toFlatten)
+	}
+
 	bldr := &Builder{
 		baseImageName:        img.Name(),
 		image:                img,
@@ -190,8 +205,8 @@ func constructBuilder(img imgutil.Image, newName string, errOnMissingLabel bool,
 		env:                  map[string]string{},
 		buildConfigEnv:       map[string]string{},
 		validateMixins:       true,
-		additionalBuildpacks: buildpack.NewManagedCollectionV2(opts.toFlatten),
-		additionalExtensions: buildpack.NewManagedCollectionV2(opts.toFlatten),
+		additionalBuildpacks: newAddedModules(),
+		additionalExtensions: newAddedModules(),
 		saveProhibited:       opts.saveProhibited,
 		system:               system,
 	}
@@ -210,6 +225,21 @@ func constructBuilder(img imgutil.Image, newName string, errOnMissingLabel bool,
 func WithFlattened(modules buildpack.FlattenModuleInfos) BuilderOption {
 	return func(o *options) error {
 		o.toFlatten = modules
+		return nil
+	}
+}
+
+// WithFlattenAllModules instructs the builder to collapse ALL modules added via
+// AddBuildpack/AddExtension into a SINGLE flattened image layer (instead of one
+// layer per module). This is used for the synthesized/ephemeral builder pack
+// creates when extra buildpacks are added to a trusted builder: without it, adding
+// N extra modules adds N image layers, which — stacked on an already-deep base
+// builder — can push the image past the daemon's layer-depth cap ("max depth
+// exceeded") before any lifecycle phase runs. Flattening keeps the added modules to
+// O(1) layers regardless of N.
+func WithFlattenAllModules() BuilderOption {
+	return func(o *options) error {
+		o.flattenAll = true
 		return nil
 	}
 }

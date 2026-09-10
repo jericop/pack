@@ -30,6 +30,7 @@ import (
 	"github.com/chainguard-dev/kaniko/pkg/util/proc"
 	"github.com/google/go-containerregistry/pkg/authn"
 	"github.com/google/go-containerregistry/pkg/name"
+	ggcrremote "github.com/google/go-containerregistry/pkg/v1/remote"
 	"github.com/moby/moby/client"
 	"github.com/pkg/errors"
 	ignore "github.com/sabhiram/go-gitignore"
@@ -603,6 +604,19 @@ func (c *Client) Build(ctx context.Context, opts BuildOptions) error {
 	}
 
 	origBuilderName := rawBuilderImage.Name()
+	// On the buildkit backend the synthesized ephemeral builder IMAGE is never
+	// consumed (the backend builds FROM the base builder and injects the added
+	// buildpacks over /cnb/buildpacks + the resolved /cnb/order.toml over LLB), so
+	// the daemon image save is pure overhead. This now holds for EXTENSIONS too: the
+	// buildkit backend stages /cnb/extensions per-arch, runs the generator, and
+	// applies build.Dockerfile (extend-build) + run.Dockerfile (extend-run) natively
+	// in LLB (spec .kiro/specs/buildkit-extension-support), so an extensions build no
+	// longer needs the daemon-synthesized builder either. Skip the save for the
+	// buildkit backend unconditionally. The populated builder OBJECT is still
+	// returned (order/extensions/env), so downstream reads work; only the daemon
+	// image is skipped. See spec .kiro/specs/buildkit-ephemeral-builder-in-llb.
+	isBuildkitBackend := multiplatform.BackendType(opts.BuildBackend).Resolve() == multiplatform.BackendBuildkit
+	skipEphemeralBuilderSave := isBuildkitBackend
 	ephemeralBuilder, err := c.createEphemeralBuilder(
 		rawBuilderImage,
 		buildEnvs,
@@ -614,6 +628,7 @@ func (c *Client) Build(ctx context.Context, opts BuildOptions) error {
 		opts.RunImage,
 		system,
 		opts.DisableSystemBuildpacks,
+		skipEphemeralBuilderSave,
 	)
 	if err != nil {
 		return err
@@ -736,6 +751,18 @@ func (c *Client) Build(ctx context.Context, opts BuildOptions) error {
 		lifecycleOpts.LifecycleApis = lifecycleAPIs
 	case !opts.TrustBuilder(opts.Builder):
 		return errors.Errorf("Lifecycle %s does not have an associated lifecycle image. Builder must be trusted.", lifecycleVersion.String())
+	}
+
+	// buildkit backend: the emit-capable lifecycle is bundled in the (per-arch) builder
+	// image itself, and the backend overlays LifecycleImage's /cnb/lifecycle onto each
+	// platform leg. If LifecycleImage is a HOST-arch-pinned digest (the default
+	// ephemeralBuilder.Name(), which is fetched for the host arch only), the arm64 leg
+	// would get amd64 lifecycle binaries. Point it at the builder's manifest-list TAG so
+	// the backend resolves the correct per-arch lifecycle for each leg (FR-8b). The
+	// backend skips the overlay when this matches the builder and is already bundled;
+	// resolving per-platform is what matters here.
+	if isBuildkitBackend {
+		lifecycleOpts.LifecycleImage = builderRef.Name()
 	}
 
 	lifecycleOpts.FetchRunImageWithLifecycleLayer = func(runImageName string) (string, error) {
@@ -897,16 +924,37 @@ func (c *Client) Build(ctx context.Context, opts BuildOptions) error {
 			// fall back to the builder image's default arch here.
 			opts.Platforms = []string{runtime.GOOS + "/" + runtime.GOARCH}
 		}
-		// Stage the user-supplied buildpack modules (--buildpack/--pre-buildpack/
-		// --post-buildpack, incl. urn:cnb:registry + local refs) so the buildkit
-		// backend can sync them into the builder over LLB. from=builder / id-only
-		// refs contribute no content and are absent from fetchedBPs.
-		extraBPDir, cleanupExtraBPs, err := stageExtraBuildpacks(fetchedBPs)
+		// Extra buildpacks (--buildpack / project.toml) for the buildkit multi-arch build
+		// must be arch-matching per platform leg. Split them:
+		//  - MULTI-ARCH registry images: the backend pulls each buildpack's PER-PLATFORM
+		//    child image in LLB (arch-correct binaries per leg) — avoids the wrong-arch
+		//    buildpack-binary bug (PLATFORM-1662 FR-8b).
+		//  - PLATFORM-AGNOSTIC ones (inline scripts, local dir/tarball, urn:cnb:registry,
+		//    single-manifest images): staged once and copied to EVERY leg.
+		// Neither touches the single-arch daemon fetch path.
+		extraBPImages, err := c.collectBuildkitPerArchBuildpackImages(opts, opts.Platforms)
 		if err != nil {
 			return err
 		}
-		defer cleanupExtraBPs()
-		return c.buildMultiPlatform(ctx, opts, lifecycleOpts, appPath, runImageName, extraBPDir, order, orderExtensions)
+		agnosticBPDir, cleanupAgnosticBPs, err := stageAgnosticExtraBuildpacks(fetchedBPs)
+		if err != nil {
+			return err
+		}
+		defer cleanupAgnosticBPs()
+		// Image extensions (--extension) are classified the SAME way as buildpacks for
+		// the buildkit backend (spec buildkit-extension-support): MULTI-ARCH images are
+		// pulled per-platform child in LLB; agnostic ones (inline/local/single-manifest)
+		// are staged once and copied to every leg's /cnb/extensions (PLATFORM-1662 FR-8b).
+		extraExImages, err := c.collectBuildkitPerArchExtensionImages(opts, opts.Platforms)
+		if err != nil {
+			return err
+		}
+		agnosticExDir, cleanupAgnosticExs, err := stageAgnosticExtensions(fetchedExs)
+		if err != nil {
+			return err
+		}
+		defer cleanupAgnosticExs()
+		return c.buildMultiPlatform(ctx, opts, lifecycleOpts, appPath, runImageName, extraBPImages, agnosticBPDir, extraExImages, agnosticExDir, hasExtensions, order, orderExtensions, bldr.Order())
 	}
 
 	// docker-daemon backend: standard container-based build against the daemon.
@@ -920,7 +968,7 @@ func (c *Client) Build(ctx context.Context, opts BuildOptions) error {
 // buildMultiPlatform handles the multi-platform build path using BuildKit.
 // It constructs lifecycle phase commands, selects the appropriate backend,
 // and dispatches the build to the multi-platform executor.
-func (c *Client) buildMultiPlatform(ctx context.Context, opts BuildOptions, lifecycleOpts build.LifecycleOptions, appPath string, runImageName string, extraBuildpacksDir string, order dist.Order, orderExtensions dist.Order) error {
+func (c *Client) buildMultiPlatform(ctx context.Context, opts BuildOptions, lifecycleOpts build.LifecycleOptions, appPath string, runImageName string, extraBuildpackImages []string, agnosticBuildpacksDir string, extraExtensionImages []string, agnosticExtensionsDir string, hasExtensions bool, order dist.Order, orderExtensions dist.Order, builderOrder dist.Order) error {
 	platforms, err := multiplatform.ParsePlatformList(opts.Platforms)
 	if err != nil {
 		return fmt.Errorf("parsing platforms: %w", err)
@@ -938,14 +986,42 @@ func (c *Client) buildMultiPlatform(ctx context.Context, opts BuildOptions, life
 	// order label. This guarantees the buildkit detection order matches the daemon's
 	// and keeps a single source of truth for both the ordering decision and its
 	// serialization.
+	//
+	// Extensions add a second requirement: the buildkit detector must be handed an
+	// order.toml that includes [[order-extensions]] whenever there are extensions —
+	// otherwise it falls back to the builder's baked-in /cnb/order.toml (which has no
+	// [[order-extensions]]), the extensions never participate in detection, and the
+	// generate/extend phases become no-ops. But when there are extensions and NO extra
+	// buildpacks, the resolved `order` is a single empty group (dist.Order{{Group: {}}}),
+	// so serializing it as-is would emit an empty [[order]]. In that case we serialize
+	// the BUILDER'S DEFAULT order for [[order]] (threaded in as builderOrder — the base
+	// builder's bldr.Order() from Build()) alongside the resolved [[order-extensions]],
+	// so normal buildpack detection still runs AND the extensions participate.
+	extensionsPresent := hasExtensions || (len(orderExtensions) > 0 && len(orderExtensions[0].Group) > 0)
 	var orderToml string
-	if len(order) > 0 && len(order[0].Group) > 0 {
+	switch {
+	case len(order) > 0 && len(order[0].Group) > 0:
+		// Extra buildpacks (--buildpack / pre / post) changed the buildpack order: use it.
 		orderToml, err = builder.OrderTOML(order, orderExtensions)
 		if err != nil {
 			return fmt.Errorf("serializing buildpack order: %w", err)
 		}
 		c.logger.Debugf("Injecting resolved buildpack order into the buildkit builder")
+	case extensionsPresent:
+		// Extensions but no extra buildpacks: serialize the builder's DEFAULT buildpack
+		// order for [[order]] plus the resolved [[order-extensions]], so the extensions
+		// participate in detection while normal buildpack groups still run. builderOrder
+		// is the base builder's order (bldr.Order() from Build()); orderExtensions is the
+		// resolved extension order (the ephemeral builder was populated with it via
+		// SetOrderExtensions, so it matches lifecycleOpts.Builder.OrderExtensions()).
+		orderToml, err = builder.OrderTOML(builderOrder, orderExtensions)
+		if err != nil {
+			return fmt.Errorf("serializing buildpack order: %w", err)
+		}
+		c.logger.Debugf("Injecting builder default order + resolved order-extensions into the buildkit builder")
 	}
+	// else: no extra buildpacks AND no extensions — orderToml stays "" so no order.toml
+	// is written and the graph is the byte-for-byte 5-phase sequence (AC-5).
 
 	// Construct the lifecycle phase commands from the lifecycle options
 	phases := buildLifecyclePhases(lifecycleOpts, runImageName, c.logger.IsVerbose())
@@ -999,38 +1075,42 @@ func (c *Client) buildMultiPlatform(ctx context.Context, opts BuildOptions, life
 
 	// Build the platform options (shared across all architectures)
 	platformBuildOpts := multiplatform.PlatformBuildOpts{
-		BuilderImage:     lifecycleOpts.BuilderImage,
-		LifecycleImage:   lifecycleOpts.LifecycleImage,
-		RunImage:         runImageName,
-		AppPath:          appPath,
-		Phases:           phases,
-		CacheID:          cacheID,
-		BuildID:          buildID,
-		ImageName:        lifecycleOpts.Image.Name(),
-		Publish:          opts.Publish,
-		DockerConfigPath: dockerConfigPath,
-		BuilderUID:       lifecycleOpts.Builder.UID(),
-		BuilderGID:       lifecycleOpts.Builder.GID(),
-		PlatformAPI:      negotiatePlatformAPI(lifecycleOpts),
-		FileFilter:       lifecycleOpts.FileFilter,
-		Network:          opts.ContainerConfig.Network,
-		ExtraBuildpacksDir: extraBuildpacksDir,
-		OrderToml:          orderToml,
-		ClearCache:       opts.ClearCache,
-		RegistryAuth:     buildRegistryAuth(c.keychain, lifecycleOpts),
+		BuilderImage:       lifecycleOpts.BuilderImage,
+		LifecycleImage:     lifecycleOpts.LifecycleImage,
+		RunImage:           runImageName,
+		AppPath:            appPath,
+		Phases:             phases,
+		CacheID:            cacheID,
+		BuildID:            buildID,
+		ImageName:          lifecycleOpts.Image.Name(),
+		Publish:            opts.Publish,
+		DockerConfigPath:   dockerConfigPath,
+		BuilderUID:         lifecycleOpts.Builder.UID(),
+		BuilderGID:         lifecycleOpts.Builder.GID(),
+		PlatformAPI:        negotiatePlatformAPI(lifecycleOpts),
+		FileFilter:         lifecycleOpts.FileFilter,
+		Network:            opts.ContainerConfig.Network,
+		ExtraBuildpackImages: extraBuildpackImages,
+		ExtraBuildpacksDir:   agnosticBuildpacksDir,
+		ExtraExtensionImages: extraExtensionImages,
+		ExtraExtensionsDir:   agnosticExtensionsDir,
+		HasExtensions:        hasExtensions,
+		OrderToml:            orderToml,
+		ClearCache:         opts.ClearCache,
+		RegistryAuth:       buildRegistryAuth(c.keychain, lifecycleOpts),
 		// Advertise the builder's stack id + OS distro to the lifecycle/buildpacks so
 		// buildpack dependency resolution can pick stack/target-specific PREBUILT
 		// dependencies instead of compiling from source (see native_buildfunc env).
-		StackID:             builderImageLabel(lifecycleOpts.Builder.Image(), "io.buildpacks.stack.id"),
-		TargetDistroName:    builderDistroLabel(lifecycleOpts.Builder.Image(), "name"),
-		TargetDistroVersion: builderDistroLabel(lifecycleOpts.Builder.Image(), "version"),
-		BuildEnv:            buildEnvs,
-		ExperimentalMode:    experimentalMode,
-		SourceDateEpoch:     sourceDateEpoch,
-		HTTPProxy:           proxyConfig.HTTPProxy,
-		HTTPSProxy:          proxyConfig.HTTPSProxy,
-		NoProxy:             proxyConfig.NoProxy,
-		Keychain:            c.keychain,
+		StackID:              builderImageLabel(lifecycleOpts.Builder.Image(), "io.buildpacks.stack.id"),
+		TargetDistroName:     builderDistroLabel(lifecycleOpts.Builder.Image(), "name"),
+		TargetDistroVersion:  builderDistroLabel(lifecycleOpts.Builder.Image(), "version"),
+		BuildEnv:             buildEnvs,
+		ExperimentalMode:     experimentalMode,
+		SourceDateEpoch:      sourceDateEpoch,
+		HTTPProxy:            proxyConfig.HTTPProxy,
+		HTTPSProxy:           proxyConfig.HTTPSProxy,
+		NoProxy:              proxyConfig.NoProxy,
+		Keychain:             c.keychain,
 		DefaultProcessType:   opts.DefaultProcessType,
 		AdditionalTags:       opts.AdditionalTags,
 		SBOMDestinationDir:   opts.SBOMDestinationDir,
@@ -1388,6 +1468,204 @@ func extractModuleToDir(module buildpack.BuildModule, destDir string) error {
 			// Skip other entry types (hardlinks/devices are not expected in module tars).
 		}
 	}
+}
+
+// collectBuildkitPerArchBuildpackImages identifies which extra buildpacks (--buildpack /
+// project.toml) are MULTI-ARCH registry images, for the BUILDKIT backend. Those are the
+// only ones that need per-platform handling: standard pack fetches a buildpack for a
+// SINGLE (host/builder) arch, so for a multi-arch buildpack the arm64 leg would otherwise
+// run amd64 binaries (PLATFORM-1662 FR-8b). For each such image the backend pulls the
+// buildpack's PER-PLATFORM child image directly in LLB (see buildEmitLLB).
+//
+// Every OTHER kind of extra buildpack is treated as PLATFORM-AGNOSTIC and staged once by
+// the caller (stageAgnosticExtraBuildpacks) to be copied to all legs:
+//   - inline buildpacks (project.toml script) — arch-neutral shell scripts,
+//   - local uri/dir/tarball refs,
+//   - urn:cnb:registry refs,
+//   - single-manifest registry images (the author intends it arch-agnostic, e.g. a
+//     shell-script buildpack using built-in tar/cp; an old amd64-only binary buildpack
+//     would fail at exec, which is the author's responsibility — we do NOT reject it).
+//
+// Returns the multi-arch image references (verified to cover every requested platform).
+// It does NOT modify the existing single-arch fetch path used by the daemon backend.
+func (c *Client) collectBuildkitPerArchBuildpackImages(opts BuildOptions, platforms []string) ([]string, error) {
+	// The declared extra buildpacks are --buildpack, else project.toml build.buildpacks
+	// (same precedence as processBuildpacks). Only image/uri entries carry content.
+	declaredBPs := opts.Buildpacks
+	if len(declaredBPs) == 0 && len(opts.ProjectDescriptor.Build.Buildpacks) != 0 {
+		for _, bp := range opts.ProjectDescriptor.Build.Buildpacks {
+			if bp.URI != "" {
+				declaredBPs = append(declaredBPs, bp.URI)
+			}
+			// id[@version] entries reference builder buildpacks (no content to inject).
+		}
+	}
+
+	var perArchImages []string
+	for _, bp := range declaredBPs {
+		locatorType, err := buildpack.GetLocatorType(bp, opts.RelativeBaseDir, []dist.ModuleInfo{})
+		if err != nil {
+			return nil, err
+		}
+		if locatorType != buildpack.PackageLocator {
+			// Not a registry image (inline/local/urn:cnb:registry) -> platform-agnostic,
+			// handled by staging. Builder/ID locators contribute no content.
+			continue
+		}
+		img := buildpack.ParsePackageLocator(bp)
+		isIndex, err := c.verifyBuildpackImageSupportsPlatforms(img, platforms)
+		if err != nil {
+			return nil, err
+		}
+		if isIndex {
+			perArchImages = append(perArchImages, img)
+		}
+		// A single-manifest image is treated as platform-agnostic: it stays in the staged
+		// (agnostic) set and is copied to all legs.
+	}
+	return perArchImages, nil
+}
+
+// stageAgnosticExtraBuildpacks stages the PLATFORM-AGNOSTIC extra buildpacks (everything
+// except the multi-arch registry images handled per-arch) into a single dir laid out as
+// /cnb/buildpacks/{id}/{version}/*, to be copied to EVERY platform leg. It selects the
+// agnostic modules from the already-fetched modules using each module's declared targets:
+// a module whose Descriptor().Targets() are empty or contain a wildcard (OS=="" / Arch=="")
+// is arch-agnostic; a module with concrete OS+Arch targets came from a multi-arch image and
+// is delivered per-arch instead (excluded here to avoid double-injection). Returns the
+// staging dir ("" if none) and a cleanup func.
+func stageAgnosticExtraBuildpacks(fetchedBPs []buildpack.BuildModule) (string, func(), error) {
+	var agnostic []buildpack.BuildModule
+	for _, bp := range fetchedBPs {
+		if moduleIsPlatformAgnostic(bp) {
+			agnostic = append(agnostic, bp)
+		}
+	}
+	return stageExtraBuildpacks(agnostic)
+}
+
+// collectBuildkitPerArchExtensionImages is the extension analog of
+// collectBuildkitPerArchBuildpackImages (spec buildkit-extension-support): it identifies
+// which extra extensions (--extension) are MULTI-ARCH registry images so the backend can
+// pull each extension's PER-PLATFORM child image in LLB (arch-correct binaries per leg,
+// PLATFORM-1662 FR-8b). Every other kind (local dir/tarball, single-manifest image) is
+// platform-agnostic and staged once by stageAgnosticExtensions. Extensions have no
+// project.toml counterpart, so the declared refs come solely from opts.Extensions (the
+// same source processExtensions uses). Reuses verifyBuildpackImageSupportsPlatforms, which
+// is module-kind-agnostic. Does NOT touch the single-arch daemon fetch path.
+func (c *Client) collectBuildkitPerArchExtensionImages(opts BuildOptions, platforms []string) ([]string, error) {
+	var perArchImages []string
+	for _, ex := range opts.Extensions {
+		locatorType, err := buildpack.GetLocatorType(ex, opts.RelativeBaseDir, []dist.ModuleInfo{})
+		if err != nil {
+			return nil, err
+		}
+		if locatorType != buildpack.PackageLocator {
+			// Not a registry image (local/id locators) -> platform-agnostic or no content.
+			continue
+		}
+		img := buildpack.ParsePackageLocator(ex)
+		isIndex, err := c.verifyBuildpackImageSupportsPlatforms(img, platforms)
+		if err != nil {
+			return nil, err
+		}
+		if isIndex {
+			perArchImages = append(perArchImages, img)
+		}
+		// A single-manifest image is treated as platform-agnostic (staged, copied to all legs).
+	}
+	return perArchImages, nil
+}
+
+// stageAgnosticExtensions is the extension analog of stageAgnosticExtraBuildpacks: it
+// stages the PLATFORM-AGNOSTIC extensions (everything except the multi-arch registry
+// images handled per-arch) into a single dir laid out as /cnb/extensions/{id}/{version}/*,
+// to be copied to EVERY platform leg. Selection reuses moduleIsPlatformAgnostic and the
+// staging reuses stageExtraBuildpacks — both operate on any buildpack.BuildModule, and an
+// extension module's tar self-roots at /cnb/extensions, so no extension-specific staging
+// is needed. Returns the staging dir ("" if none) and a cleanup func.
+func stageAgnosticExtensions(fetchedExs []buildpack.BuildModule) (string, func(), error) {
+	var agnostic []buildpack.BuildModule
+	for _, ex := range fetchedExs {
+		if moduleIsPlatformAgnostic(ex) {
+			agnostic = append(agnostic, ex)
+		}
+	}
+	return stageExtraBuildpacks(agnostic)
+}
+
+// moduleIsPlatformAgnostic reports whether a fetched buildpack module is arch-neutral:
+// it declares no concrete OS+Arch target (empty Targets, or a wildcard OS==""/Arch=="").
+// Arch-specific modules (concrete OS+Arch, i.e. from a multi-arch image) return false so
+// they are delivered per-arch rather than staged once.
+func moduleIsPlatformAgnostic(bp buildpack.BuildModule) bool {
+	targets := bp.Descriptor().Targets()
+	if len(targets) == 0 {
+		return true
+	}
+	for _, t := range targets {
+		if t.OS == "" || t.Arch == "" {
+			return true // wildcard target => agnostic
+		}
+	}
+	return false
+}
+
+// verifyBuildpackImageSupportsPlatforms inspects a buildpack registry image. It returns
+// isIndex=true when the image is a manifest list (multi-arch), in which case it also
+// verifies the list includes EVERY requested platform (erroring otherwise). isIndex=false
+// means a single-manifest image, which the caller treats as platform-agnostic (no error).
+func (c *Client) verifyBuildpackImageSupportsPlatforms(imageRef string, platforms []string) (bool, error) {
+	ref, err := name.ParseReference(imageRef, name.WeakValidation)
+	if err != nil {
+		return false, errors.Wrapf(err, "parsing buildpack image reference %q", imageRef)
+	}
+	desc, err := ggcrremote.Get(ref, ggcrremote.WithAuthFromKeychain(c.keychain))
+	if err != nil {
+		return false, errors.Wrapf(err, "fetching buildpack image %q (must be a reachable registry image)", imageRef)
+	}
+	if !desc.MediaType.IsIndex() {
+		// Single-manifest image: treat as platform-agnostic (copied to all legs). If it
+		// is actually an arch-specific binary buildpack for the wrong arch it will fail at
+		// exec — that is the buildpack author's responsibility, matching daemon behavior.
+		return false, nil
+	}
+	idx, err := desc.ImageIndex()
+	if err != nil {
+		return false, errors.Wrapf(err, "reading manifest list of buildpack image %q", imageRef)
+	}
+	im, err := idx.IndexManifest()
+	if err != nil {
+		return false, errors.Wrapf(err, "reading manifest list of buildpack image %q", imageRef)
+	}
+	have := map[string]bool{}
+	for _, m := range im.Manifests {
+		if m.Platform != nil {
+			have[m.Platform.OS+"/"+m.Platform.Architecture] = true
+		}
+	}
+	var missing []string
+	for _, plat := range platforms {
+		// Compare on os/arch (ignore any variant suffix in the requested platform).
+		key := plat
+		if parts := strings.Split(plat, "/"); len(parts) >= 2 {
+			key = parts[0] + "/" + parts[1]
+		}
+		if !have[key] {
+			missing = append(missing, plat)
+		}
+	}
+	if len(missing) > 0 {
+		var avail []string
+		for k := range have {
+			avail = append(avail, k)
+		}
+		return false, errors.Errorf(
+			"buildpack image %q does not support requested platform(s) %s (it provides: %s); "+
+				"a buildkit multi-platform build requires every --buildpack to support every --platform",
+			imageRef, strings.Join(missing, ", "), strings.Join(avail, ", "))
+	}
+	return true, nil
 }
 
 func usesContainerdStorage(docker DockerClient) bool {
@@ -2240,13 +2518,43 @@ func (c *Client) createEphemeralBuilder(
 	runImage string,
 	system dist.System,
 	disableSystem bool,
+	skipSave bool,
 ) (*builder.Builder, error) {
 	if !ephemeralBuilderNeeded(env, order, buildpacks, orderExtensions, extensions, runImage) && !disableSystem {
 		return builder.New(rawBuilderImage, rawBuilderImage.Name(), builder.WithoutSave())
 	}
 
 	origBuilderName := rawBuilderImage.Name()
-	bldr, err := builder.New(rawBuilderImage, fmt.Sprintf("pack.local/builder/%x:latest", randString(10)), builder.WithRunImage(runImage))
+	// skipSave: the buildkit backend never consumes a synthesized ephemeral builder
+	// IMAGE — it builds FROM the base builder over LLB and injects the added
+	// buildpacks (/cnb/buildpacks) + resolved /cnb/order.toml itself (see
+	// buildEmitLLB). So synthesizing + loading a pack.local/builder/<hex> image into
+	// the Docker daemon is pure overhead there (and the origin of FR-7's
+	// "max depth exceeded"). In that case we still construct the builder OBJECT and
+	// populate its buildpacks/order/extensions/system/env — so downstream reads
+	// (UID/GID, stack/distro labels, platform API, order/extensions) work exactly as
+	// before — but we DO NOT call Save (no daemon image). We also name it after the
+	// base builder so the caller's cleanup ImageRemove no-ops.
+	// The caller sets skipSave for the buildkit backend regardless of extensions:
+	// the buildkit backend now drives the extension flow over LLB too (stages
+	// /cnb/extensions per-arch, runs the generator, applies build.Dockerfile +
+	// run.Dockerfile natively), so an extensions build no longer needs the daemon-
+	// synthesized builder either (spec .kiro/specs/buildkit-extension-support).
+	// See spec .kiro/specs/buildkit-ephemeral-builder-in-llb.
+	builderName := fmt.Sprintf("pack.local/builder/%x:latest", randString(10))
+	if skipSave {
+		// Name it after the base builder so the caller's deferred cleanup
+		// (ImageRemove when name != origBuilderName) no-ops. We return before Save,
+		// so no image with this name is ever created.
+		builderName = rawBuilderImage.Name()
+	}
+	// Flatten all added modules into a single image layer. The ephemeral builder is
+	// synthesized on TOP of the (already-deep) base builder image, so adding one
+	// image layer per extra buildpack module can push the image past the daemon's
+	// layer-depth cap ("max depth exceeded") before any lifecycle phase runs.
+	// Flattening keeps the added modules to O(1) layers regardless of how many are
+	// added. See FR-7 (PLATFORM-1662 follow-ups).
+	bldr, err := builder.New(rawBuilderImage, builderName, builder.WithRunImage(runImage), builder.WithFlattenAllModules())
 	if err != nil {
 		return nil, errors.Wrapf(err, "invalid builder %s", style.Symbol(origBuilderName))
 	}
@@ -2274,6 +2582,14 @@ func (c *Client) createEphemeralBuilder(
 
 	bldr.SetValidateMixins(validateMixins)
 	bldr.SetSystem(system)
+
+	// buildkit backend (skipSave): return the populated builder OBJECT without saving
+	// a daemon image. The added modules + order are carried to the backend separately
+	// (fetchedBPs -> stageExtraBuildpacks -> ExtraBuildpacksDir, and order -> OrderTOML)
+	// and injected over LLB, so no ephemeral image is needed.
+	if skipSave {
+		return bldr, nil
+	}
 
 	if err := bldr.Save(c.logger, builder.CreatorMetadata{Version: c.version}); err != nil {
 		return nil, err

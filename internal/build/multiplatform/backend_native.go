@@ -10,7 +10,6 @@ import (
 	"github.com/moby/buildkit/util/entitlements"
 	ocispecs "github.com/opencontainers/image-spec/specs-go/v1"
 	"github.com/tonistiigi/fsutil"
-	fstypes "github.com/tonistiigi/fsutil/types"
 
 	"github.com/buildpacks/lifecycle/phase/finalize"
 
@@ -121,28 +120,28 @@ func (b *BuildkitBackend) driveNative(ctx context.Context, bkClient *client.Clie
 	// kept out of scope for simplicity; see the RFC's open questions.
 
 	// App source as the build context local.
-	appFS, err := fsutil.NewFS(opts.AppPath)
-	if err != nil {
-		return nil, fmt.Errorf("creating local FS for app path %s: %w", opts.AppPath, err)
-	}
+	//
 	// project.toml [build] include/exclude (pack --descriptor): honor the same file
 	// filter the daemon backend applies when taring the app dir, so excluded files
-	// never sync into the build context. The filter is a keep-predicate
-	// (true = include); bridge it to fsutil's per-path Map. Paths from fsutil are
-	// relative to opts.AppPath with no leading slash, matching the daemon's CopyDir.
+	// never sync into the build context. Rather than wrap the FS in a FilterFS(Map)
+	// — which can make fsutil's diff/send stream entries in an order BuildKit's
+	// receiver rejects with "changes out of order" for nested layouts (e.g. a root
+	// file plus a nested src/<pkg>/ dir) — we STAGE the kept files into a temp dir and
+	// hand BuildKit a plain fsutil.NewFS over it, which walks in the standard sorted
+	// order the receiver accepts. Paths passed to the filter are relative to
+	// opts.AppPath with no leading slash, matching the daemon's CopyDir.
+	appPath := opts.AppPath
 	if opts.FileFilter != nil {
-		filter := opts.FileFilter
-		appFS, err = fsutil.NewFilterFS(appFS, &fsutil.FilterOpt{
-			Map: func(p string, _ *fstypes.Stat) fsutil.MapResult {
-				if filter(p) {
-					return fsutil.MapResultKeep
-				}
-				return fsutil.MapResultExclude
-			},
-		})
-		if err != nil {
-			return nil, fmt.Errorf("applying project descriptor file filter: %w", err)
+		stagedDir, cleanup, serr := stageFilteredAppDir(opts.AppPath, opts.FileFilter)
+		if serr != nil {
+			return nil, fmt.Errorf("applying project descriptor file filter: %w", serr)
 		}
+		defer cleanup()
+		appPath = stagedDir
+	}
+	appFS, err := fsutil.NewFS(appPath)
+	if err != nil {
+		return nil, fmt.Errorf("creating local FS for app path %s: %w", appPath, err)
 	}
 
 	authProvider := newDockerAuthProvider()
@@ -168,13 +167,13 @@ func (b *BuildkitBackend) driveNative(ctx context.Context, bkClient *client.Clie
 	}
 
 	in := nativeBuildInputs{
-		builderImage: opts.BuilderImage,
-		runImage:     opts.RunImage,
-		imageName:    opts.ImageName,
-		platforms:    ocispecsPlatforms(platforms),
-		platformAPI:  opts.PlatformAPI,
-		uid:          effUID,
-		gid:          effGID,
+		builderImage:        opts.BuilderImage,
+		runImage:            opts.RunImage,
+		imageName:           opts.ImageName,
+		platforms:           ocispecsPlatforms(platforms),
+		platformAPI:         opts.PlatformAPI,
+		uid:                 effUID,
+		gid:                 effGID,
 		orderTOML:           opts.OrderToml,
 		registryAuth:        opts.RegistryAuth,
 		stackID:             opts.StackID,
@@ -191,9 +190,13 @@ func (b *BuildkitBackend) driveNative(ctx context.Context, bkClient *client.Clie
 		sbomDestDir:         opts.SBOMDestinationDir,
 		reportDestDir:       opts.ReportDestinationDir,
 		bindings:            opts.Bindings,
-		workspace:           workspace,
-		execEnv:             opts.ExecutionEnv,
-		hasExtraBuildpacks:  opts.ExtraBuildpacksDir != "",
+		workspace:            workspace,
+		execEnv:              opts.ExecutionEnv,
+		extraBuildpackImages: opts.ExtraBuildpackImages,
+		hasAgnosticBuildpacks: opts.ExtraBuildpacksDir != "",
+		hasExtensions:         opts.HasExtensions,
+		extraExtensionImages:  opts.ExtraExtensionImages,
+		hasAgnosticExtensions: opts.ExtraExtensionsDir != "",
 	}
 	if reg := registryHost(opts.ImageName); reg != "" && isLikelyInsecureRegistry(reg) {
 		in.insecureRegistries = []string{reg}
@@ -214,20 +217,32 @@ func (b *BuildkitBackend) driveNative(ctx context.Context, bkClient *client.Clie
 		}
 		localMounts[bindingLocalName(b.Name)] = bindFS
 	}
-	// Extra buildpack modules (--buildpack / --pre-buildpack / --post-buildpack):
-	// synced in as one local and copied over the builder's /cnb/buildpacks (see
-	// buildEmitLLB). Present only when the user supplied additional buildpacks.
+	// Multi-arch extra buildpacks are pulled per-platform as registry images directly in
+	// LLB (see buildEmitLLB) — no host-side local mount. PLATFORM-AGNOSTIC extra
+	// buildpacks (inline/local/single-manifest) are staged host-side and synced in as one
+	// local, copied to every leg.
 	if opts.ExtraBuildpacksDir != "" {
 		bpFS, ferr := fsutil.NewFS(opts.ExtraBuildpacksDir)
 		if ferr != nil {
-			return nil, fmt.Errorf("creating local FS for extra buildpacks dir %s: %w", opts.ExtraBuildpacksDir, ferr)
+			return nil, fmt.Errorf("creating local FS for agnostic extra buildpacks dir %s: %w", opts.ExtraBuildpacksDir, ferr)
 		}
 		localMounts[extraBuildpacksLocalName] = bpFS
+	}
+	// Multi-arch extensions are pulled per-platform as registry images directly in LLB
+	// (see stageExtensionsLLB) — no host-side local mount. PLATFORM-AGNOSTIC extensions
+	// (inline/local/single-manifest) are staged host-side and synced in as one local,
+	// copied to every leg's /cnb/extensions.
+	if opts.ExtraExtensionsDir != "" {
+		exFS, ferr := fsutil.NewFS(opts.ExtraExtensionsDir)
+		if ferr != nil {
+			return nil, fmt.Errorf("creating local FS for agnostic extensions dir %s: %w", opts.ExtraExtensionsDir, ferr)
+		}
+		localMounts[extensionsLocalName] = exFS
 	}
 
 	solveOpt := client.SolveOpt{
 		LocalMounts: localMounts,
-		Session: []session.Attachable{authProvider},
+		Session:     []session.Attachable{authProvider},
 		// FrontendAttrs MUST be non-nil: BuildKit's client.solve does
 		// `maps.Copy(maps.Clone(opt.FrontendAttrs), cacheOpt.frontendAttrs)`, and
 		// when CacheImports is set (--buildkit-cache-from) it writes "cache-imports"

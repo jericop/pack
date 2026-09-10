@@ -14,6 +14,8 @@ import (
 
 	"github.com/BurntSushi/toml"
 	ggcrname "github.com/google/go-containerregistry/pkg/name"
+	v1 "github.com/google/go-containerregistry/pkg/v1"
+	"github.com/google/go-containerregistry/pkg/v1/remote"
 	"github.com/moby/buildkit/client/llb"
 	"github.com/moby/buildkit/client/llb/sourceresolver"
 	"github.com/moby/buildkit/exporter/containerimage/exptypes"
@@ -103,16 +105,34 @@ type nativeBuildInputs struct {
 	// default /workspace. The app source is copied here and every phase runs with
 	// -app <workspace>.
 	workspace string
-	// hasExtraBuildpacks indicates the user supplied additional buildpack modules
-	// (--buildpack / --pre-buildpack / --post-buildpack). When true, buildEmitLLB
-	// syncs the staged modules (llb.Local(extraBuildpacksLocalName), a tree rooted at
-	// /cnb/buildpacks/...) and copies them over the builder's /cnb/buildpacks before
-	// detect, so added buildpacks participate and same-id/version modules override the
-	// builder's copy. The staging dir is provided by the backend as a local mount.
-	hasExtraBuildpacks bool
+	// extraBuildpackImages are the registry image refs of user-supplied MULTI-ARCH extra
+	// buildpacks (--buildpack / project.toml), each supporting every requested platform
+	// (pack verified this). For each platform leg, buildEmitLLB pulls each buildpack's
+	// PER-PLATFORM child image and COPYs its /cnb/buildpacks over the builder's before
+	// detect — so every arch gets its OWN arch-matching buildpack binaries
+	// (PLATFORM-1662 FR-8b) and same-id/version modules override the builder's copy.
+	extraBuildpackImages []string
+	// hasAgnosticBuildpacks indicates the backend staged PLATFORM-AGNOSTIC extra
+	// buildpacks (inline scripts, local dir/tarball, urn:cnb:registry, single-manifest
+	// images) as a single local (extraBuildpacksLocalName). When true, buildEmitLLB
+	// copies that same arch-neutral tree over /cnb/buildpacks on EVERY platform leg.
+	hasAgnosticBuildpacks bool
 	// execEnv is the CNB execution environment (pack --exec-env, e.g. production/
 	// test/development). Passed as CNB_EXEC_ENV when the platform API is >= 0.15.
 	execEnv string
+	// --- CNB image extensions (spec buildkit-extension-support) ---
+	// hasExtensions indicates the resolved order contains one or more image extensions.
+	// When true (and platform API >= 0.13), buildEmitLLB runs the generator phase and the
+	// backend applies the generated run/build Dockerfiles in LLB (kaniko-free).
+	hasExtensions bool
+	// extraExtensionImages are registry image refs of MULTI-ARCH extensions, each
+	// supporting every requested platform; delivered per-arch (per-platform child pull)
+	// like extraBuildpackImages.
+	extraExtensionImages []string
+	// hasAgnosticExtensions indicates the backend staged PLATFORM-AGNOSTIC extensions
+	// (inline/local/single-manifest) as one local (extensionsLocalName), copied to every
+	// leg's /cnb/extensions.
+	hasAgnosticExtensions bool
 }
 
 // bindingLocalName returns the llb.Local key (and SolveOpt.LocalMounts key) for a
@@ -180,7 +200,88 @@ func makeNativeBuildFunc(in nativeBuildInputs) client.BuildFunc {
 // build-metadata, assemble FROM run-image via llb.Copy from sources, and return the
 // assembled ref + the marshaled image config (runtime config + build-metadata label).
 func nativeBuildPlatform(ctx context.Context, c client.Client, in nativeBuildInputs, p ocispecs.Platform) (client.Reference, []byte, error) {
-	built := buildEmitLLB(in, p)
+	// Resolve the base builder (and the emit-capable lifecycle image, when overlaid)
+	// to their PER-PLATFORM digest-pinned refs. Without this, llb.Image(tag,
+	// Platform(p)) resolves the tag once to the daemon's default arch, so every
+	// platform leg would run the SAME arch's builder — e.g. the arm64 leg executing
+	// amd64 buildpack binaries, which then fetch amd64 dependencies (wrong-arch
+	// python3 -> SIGTRAP/ENOENT). PLATFORM-1662 FR-8b.
+	builderRef, err := resolvePlatformRefNBF(ctx, c, in.builderImage, p)
+	if err != nil {
+		return nil, nil, err
+	}
+	lifecycleRef := in.lifecycleImage
+	if lifecycleRef != "" {
+		lifecycleRef, err = resolvePlatformRefNBF(ctx, c, in.lifecycleImage, p)
+		if err != nil {
+			return nil, nil, err
+		}
+	}
+	// Resolve each extra buildpack image to its PER-PLATFORM child digest so this leg
+	// copies in the arch-matching buildpack binaries (FR-8b). pack has already verified
+	// each supports platform p.
+	var extraBuildpackRefs []string
+	for _, bpImg := range in.extraBuildpackImages {
+		bpRef, rerr := resolvePlatformRefNBF(ctx, c, bpImg, p)
+		if rerr != nil {
+			return nil, nil, rerr
+		}
+		extraBuildpackRefs = append(extraBuildpackRefs, bpRef)
+	}
+	// Resolve each extra EXTENSION image to its per-platform child digest, mirroring the
+	// buildpack loop above (PLATFORM-1662 FR-8b): each leg stages the arch-matching
+	// extension binaries. pack has already verified each supports platform p.
+	var extraExtensionRefs []string
+	for _, exImg := range in.extraExtensionImages {
+		exRef, rerr := resolvePlatformRefNBF(ctx, c, exImg, p)
+		if rerr != nil {
+			return nil, nil, rerr
+		}
+		extraExtensionRefs = append(extraExtensionRefs, exRef)
+	}
+
+	// --- CNB image extensions: extend the BUILD image (spec buildkit-extension-support,
+	// FR-3 / Stage 2). LLB is declarative, so the generated build.Dockerfile content only
+	// exists AFTER the generator RUN has executed — a single buildEmitLLB pass cannot both
+	// run the generator and translate its output. So when extensions are enabled we use the
+	// multi-solve model (design.md "Multi-solve execution model"): solve the prefix through
+	// the generator, read the generated build.Dockerfiles, apply extend-build to the builder
+	// state, then continue the SAME graph (restorer → builder → exporter) on the extended
+	// builder. The prefix + suffix vertices are byte-identical to the single-pass graph, so
+	// BuildKit cache-hits the shared prefix on the second solve via the SAME gateway client c.
+	//
+	// The no-extension path takes the original single buildEmitLLB pass unchanged, so its
+	// emitted graph is byte-for-byte the current 5-phase sequence (AC-5).
+	var built llb.State
+	if extensionsEnabled(in) {
+		prefix, pp := buildEmitThroughGeneratorLLB(in, p, builderRef, lifecycleRef, extraBuildpackRefs, extraExtensionRefs)
+		prefixRef, perr := solveLLB(ctx, c, prefix, p)
+		if perr != nil {
+			return nil, nil, errors.Wrap(perr, "solve emit graph (through generator)")
+		}
+		_, buildDF, derr := discoverGeneratedFromRef(ctx, prefixRef)
+		if derr != nil {
+			return nil, nil, errors.Wrap(derr, "discover generated build Dockerfiles")
+		}
+		builderBase := prefix
+		if len(buildDF) > 0 {
+			// build_id must change per build so $build_id-referencing RUNs rebuild; there is
+			// no build_id field threaded on nativeBuildInputs, so mint a fresh one (mirrors
+			// the run-image extend below).
+			buildID := buildIDUUID()
+			userID := fmt.Sprintf("%d", in.uid)
+			groupID := fmt.Sprintf("%d", in.gid)
+			appSrc := llb.Local(contextLocalName)
+			extended, _, eerr := extendBuildImageLLB(builderBase, buildDF, buildID, userID, groupID, platformLabel(p), appSrc)
+			if eerr != nil {
+				return nil, nil, errors.Wrap(eerr, "extend build image")
+			}
+			builderBase = extended
+		}
+		built = buildEmitSuffixLLB(builderBase, in, platformLabel(p), pp)
+	} else {
+		built = buildEmitLLB(in, p, builderRef, lifecycleRef, extraBuildpackRefs, extraExtensionRefs)
+	}
 	builtRef, err := solveLLB(ctx, c, built, p)
 	if err != nil {
 		return nil, nil, errors.Wrap(err, "solve emit graph")
@@ -220,7 +321,42 @@ func nativeBuildPlatform(ctx context.Context, c client.Client, in nativeBuildInp
 		return nil, nil, errors.Wrap(err, "resolve run image config")
 	}
 
-	assembled := assembleFromRunImage(runRef, built, plan, p)
+	// --- CNB image extensions: extend the RUN image (spec buildkit-extension-support,
+	// FR-4 / Stage 1). All guarded on extensionsEnabled(in) + len(runDF)>0 so a build
+	// with no extensions produces the exact previous graph (AC-5): the run base is the
+	// plain llb.Image(runRef) and no extend vertices are added.
+	//
+	// This is the second solve of the multi-solve model (design.md "Multi-solve execution
+	// model"): the emit graph solved above (builtRef) already ran the generator (Task 3),
+	// so the generated run.Dockerfiles live at generatedDirNBF in builtRef and are read
+	// back here via the SAME gateway client c — BuildKit's vertex cache makes the shared
+	// prefix (base pull, staging, analyzer…exporter) free on this solve.
+	runBase := llb.Image(runRef, llb.Platform(p))
+	var extCfg extImageConfig
+	var haveExtCfg bool
+	if extensionsEnabled(in) {
+		runDF, _, derr := discoverGeneratedFromRef(ctx, builtRef)
+		if derr != nil {
+			return nil, nil, errors.Wrap(derr, "discover generated run Dockerfiles")
+		}
+		if len(runDF) > 0 {
+			// buildID must change per build so $build_id-referencing RUNs rebuild; there
+			// is no build_id field threaded on nativeBuildInputs, so mint a fresh one.
+			buildID := buildIDUUID()
+			userID := fmt.Sprintf("%d", in.uid)
+			groupID := fmt.Sprintf("%d", in.gid)
+			appSrc := llb.Local(contextLocalName)
+			extended, cfg, eerr := extendRunImageLLB(runBase, runDF, buildID, userID, groupID, platformLabel(p), appSrc)
+			if eerr != nil {
+				return nil, nil, errors.Wrap(eerr, "extend run image")
+			}
+			runBase = extended
+			extCfg = cfg
+			haveExtCfg = true
+		}
+	}
+
+	assembled := assembleOnRunBase(runBase, built, plan, p)
 	assembledRef, err := solveLLB(ctx, c, assembled, p)
 	if err != nil {
 		return nil, nil, errors.Wrap(err, "solve assembled image")
@@ -232,6 +368,29 @@ func nativeBuildPlatform(ctx context.Context, c client.Client, in nativeBuildInp
 		img.Config.Labels = map[string]string{}
 	}
 	img.Config.Labels[emit.BuildMetadataLabel] = bmJSON
+
+	// Merge the run-image extension's config mutations into the final image config
+	// (spec buildkit-extension-support, FR-4). The extension's LABELs — notably
+	// io.buildpacks.rebasable — land here; its ENV merges over the base (existing
+	// values preserved via mergeEnvNBF's seen-set), and USER/WorkingDir apply when the
+	// Dockerfile set them. Applied AFTER the build-metadata label so the build-authored
+	// labels survive: extension labels only ADD keys (they don't carry the reserved
+	// build-metadata key), so this cannot clobber it. Guarded so the no-extension path
+	// leaves img untouched (AC-5).
+	if haveExtCfg {
+		for k, v := range extCfg.labels {
+			img.Config.Labels[k] = v
+		}
+		if len(extCfg.env) > 0 {
+			img.Config.Env = mergeEnvNBF(img.Config.Env, extCfg.env)
+		}
+		if extCfg.user != "" {
+			img.Config.User = extCfg.user
+		}
+		if extCfg.workdir != "" {
+			img.Config.WorkingDir = extCfg.workdir
+		}
+	}
 
 	// --creation-time: set the image config's `created` timestamp from
 	// SOURCE_DATE_EPOCH. On the daemon backend the exporter does this via
@@ -258,7 +417,18 @@ func nativeBuildPlatform(ctx context.Context, c client.Client, in nativeBuildInp
 // state (buildpack/app/launcher) or from the small persisted tree (synthesized
 // layers like process-types). Reused run-image layers are already in the base.
 func assembleFromRunImage(runRef string, built llb.State, plan emit.Plan, p ocispecs.Platform) llb.State {
-	state := llb.Image(runRef, llb.Platform(p))
+	return assembleOnRunBase(llb.Image(runRef, llb.Platform(p)), built, plan, p)
+}
+
+// assembleOnRunBase is assembleFromRunImage with the run-image BASE state supplied by the
+// caller instead of constructed from runRef. The extension path (spec
+// buildkit-extension-support, FR-4) builds the run base once, applies the generated
+// run.Dockerfiles to it via extendRunImageLLB, and passes the EXTENDED state here so the
+// layer copies land on top of the extended run image. The no-extension path calls
+// assembleFromRunImage, which passes the plain llb.Image(runRef) base — byte-for-byte the
+// previous behavior (AC-5).
+func assembleOnRunBase(runBase llb.State, built llb.State, plan emit.Plan, p ocispecs.Platform) llb.State {
+	state := runBase
 	plat := platformLabel(p)
 	for _, layer := range plan.Layers {
 		if layer.Reused {
@@ -413,6 +583,51 @@ func resolveImageConfigNBF(ctx context.Context, c client.Client, ref string, p o
 	return &img, nil
 }
 
+// resolvePlatformRefNBF resolves an image reference (a tag or digest) to the
+// PER-PLATFORM digest-pinned reference for platform p. This is REQUIRED for the base
+// builder + lifecycle images: llb.Image(tag, llb.Platform(p)) alone does NOT reliably
+// select the per-arch manifest — the gateway resolves the tag once to the daemon's
+// default platform, so a multi-arch build would run the SAME arch's builder (and thus
+// the wrong-arch buildpack binaries) on every platform leg. Resolving the config with
+// an explicit Platform yields a ref pinned to that platform's manifest digest, which
+// we then hand to llb.Image so each leg truly uses its own architecture. (The run image
+// already gets this treatment via the analyzer-pinned digest in analyzed.toml — see
+// resolvedRunImageRefNBF.) PLATFORM-1662 FR-8b.
+func resolvePlatformRefNBF(ctx context.Context, c client.Client, ref string, p ocispecs.Platform) (string, error) {
+	// Resolve to the PER-PLATFORM CHILD MANIFEST digest and pin llb.Image to
+	// name@<child-digest>. This is the only unambiguous way to make each platform leg
+	// use its own architecture: passing a tag OR a manifest-LIST/index digest to
+	// llb.Image leaves platform selection to the gateway, which (FR-8b) resolves it to
+	// a single arch (the daemon default) and reuses that for every leg — so the arm64
+	// leg ends up running amd64 builder/buildpack binaries. A single-arch child digest
+	// has nothing to (mis)select. We resolve the child via go-containerregistry (the
+	// same library the run-image finalize path uses); for a Docker Hub image the digests
+	// the host sees are identical to what the builder pulls.
+	named, err := ggcrname.ParseReference(ref, ggcrname.WeakValidation)
+	if err != nil {
+		return "", errors.Wrapf(err, "parsing ref %s", ref)
+	}
+	plat := v1.Platform{OS: p.OS, Architecture: p.Architecture, Variant: p.Variant}
+	desc, err := remote.Get(named, remote.WithContext(ctx), remote.WithPlatform(plat))
+	if err != nil {
+		return "", errors.Wrapf(err, "resolving %s for %s/%s", ref, p.OS, p.Architecture)
+	}
+	// remote.Get returns the TOP-LEVEL descriptor — for a manifest LIST that is the
+	// index digest, not the per-platform child. Calling desc.Image() applies the
+	// WithPlatform option to select the child image; its Digest() is the child manifest
+	// digest we want to pin. (For an already single-arch ref, Image() returns that image
+	// and Digest() is its own digest.)
+	img, err := desc.Image()
+	if err != nil {
+		return "", errors.Wrapf(err, "selecting %s/%s image from %s", p.OS, p.Architecture, ref)
+	}
+	childDigest, err := img.Digest()
+	if err != nil {
+		return "", errors.Wrapf(err, "digest of %s/%s image from %s", p.OS, p.Architecture, ref)
+	}
+	return named.Context().Name() + "@" + childDigest.String(), nil
+}
+
 func solveLLB(ctx context.Context, c client.Client, st llb.State, p ocispecs.Platform) (client.Reference, error) {
 	def, err := st.Marshal(ctx, llb.Platform(p))
 	if err != nil {
@@ -454,6 +669,21 @@ func mergeEnvNBF(base []string, overlay map[string]string) []string {
 	return out
 }
 
+// emitPhaseParams carries the run options shared by every lifecycle phase (env slice,
+// -skip-chown args, -insecure-registry args, read-only binding mounts, and the persistent
+// cache mount). It is threaded from the prefix (buildEmitThroughGeneratorLLB) to the suffix
+// (buildEmitSuffixLLB) so the extension path can insert extend-build vertices between them
+// while the two segments still emit byte-identical phase vertices — which is what lets
+// BuildKit cache-hit the shared prefix across the two solves the extension path performs
+// (design.md "Multi-solve execution model").
+type emitPhaseParams struct {
+	env           []llb.RunOption
+	skipChown     []string
+	insecure      []string
+	bindingMounts []llb.RunOption
+	cacheMount    llb.RunOption
+}
+
 // buildEmitLLB constructs the LLB that runs the lifecycle phases + exporter
 // emit-mode, producing /emit/buildkit/{plan.json,config.json,build-metadata.json}
 // and the per-layer sources under /layers + /workspace in the built state.
@@ -468,12 +698,37 @@ func platformLabel(p ocispecs.Platform) string {
 	return s
 }
 
-func buildEmitLLB(in nativeBuildInputs, p ocispecs.Platform) llb.State {
-	base := llb.Image(in.builderImage, llb.Platform(p))
+// buildEmitLLB builds the emit-graph LLB for one platform. builderRef and lifecycleRef
+// are the PER-PLATFORM digest-pinned image refs resolved by the caller (see
+// resolvePlatformRefNBF); using them — instead of the raw tag in in.builderImage /
+// in.lifecycleImage — guarantees each platform leg runs its OWN architecture's builder
+// and lifecycle binaries (PLATFORM-1662 FR-8b).
+//
+// It composes the two segments the extension multi-solve model needs (design.md
+// "Multi-solve execution model"): buildEmitThroughGeneratorLLB (base setup … analyzer,
+// detector, and — when extensions are enabled — the generator) followed by
+// buildEmitSuffixLLB (restorer → builder → exporter emit). The no-extension path calls
+// exactly these two helpers with nothing between them, so the emitted graph is byte-for-byte
+// the current 5-phase sequence (AC-5). The extension path (nativeBuildPlatform) calls the
+// same two helpers but solves after the prefix, applies extend-build, and then calls the
+// suffix on the extended builder state.
+func buildEmitLLB(in nativeBuildInputs, p ocispecs.Platform, builderRef, lifecycleRef string, extraBuildpackRefs []string, extraExtensionRefs []string) llb.State {
+	base, pp := buildEmitThroughGeneratorLLB(in, p, builderRef, lifecycleRef, extraBuildpackRefs, extraExtensionRefs)
+	return buildEmitSuffixLLB(base, in, platformLabel(p), pp)
+}
+
+// buildEmitThroughGeneratorLLB builds the emit graph from the base builder image THROUGH
+// the analyzer, detector, and (when extensionsEnabled(in)) the generator phase — i.e. the
+// segment that must be solved before the generated build.Dockerfile / run.Dockerfile can be
+// read (design.md "Multi-solve execution model"). It returns the state at that point plus
+// the emitPhaseParams the suffix phases need. See buildEmitLLB for the composition contract
+// (the no-extension path chains this straight into buildEmitSuffixLLB, unchanged — AC-5).
+func buildEmitThroughGeneratorLLB(in nativeBuildInputs, p ocispecs.Platform, builderRef, lifecycleRef string, extraBuildpackRefs []string, extraExtensionRefs []string) (llb.State, emitPhaseParams) {
+	base := llb.Image(builderRef, llb.Platform(p))
 	plat := platformLabel(p) // e.g. "linux/arm64" — prefixed onto every vertex name below
 
-	if in.lifecycleImage != "" {
-		lc := llb.Image(in.lifecycleImage, llb.Platform(p))
+	if lifecycleRef != "" {
+		lc := llb.Image(lifecycleRef, llb.Platform(p))
 		base = base.Run(
 			llb.Args([]string{"/bin/sh", "-c", "rm -rf /cnb/lifecycle"}),
 			llb.WithCustomNamef("[%s] remove existing lifecycle", plat),
@@ -498,30 +753,56 @@ func buildEmitLLB(in nativeBuildInputs, p ocispecs.Platform) llb.State {
 		).Root()
 	}
 
-	// Extra buildpack modules (--buildpack / --pre-buildpack / --post-buildpack):
-	// the staged tree is rooted at /cnb/buildpacks/... so copying it over the
-	// builder's /cnb/buildpacks adds new modules and OVERRIDES same-id/version ones
-	// (the "test a local buildpack change" use case). This runs before detect, and
-	// only mutates the transient builder state — the final image is assembled FROM
-	// the run image, so these modules never enter the output. Copying (vs mounting)
-	// is intentional: the modules must persist through the detect/build RUNs.
-	if in.hasExtraBuildpacks {
-		bpSrc := llb.Local(extraBuildpacksLocalName)
+	// PLATFORM-AGNOSTIC extra buildpacks (inline scripts, local dir/tarball,
+	// urn:cnb:registry, single-manifest images): the backend staged them as one local
+	// (extraBuildpacksLocalName), arch-neutral, so copy the SAME tree over /cnb/buildpacks
+	// on every leg. Done BEFORE the per-arch images so an arch-specific buildpack of the
+	// same id/version would win.
+	if in.hasAgnosticBuildpacks {
+		agSrc := llb.Local(extraBuildpacksLocalName)
+		base = base.File(
+			llb.Copy(agSrc, "/cnb/buildpacks", "/cnb/buildpacks", &llb.CopyInfo{
+				CreateDestPath:      true,
+				AllowWildcard:       true,
+				AllowEmptyWildcard:  true,
+				CopyDirContentsOnly: true,
+			}),
+			llb.WithCustomNamef("[%s] add platform-agnostic buildpacks", plat),
+		)
+	}
+
+	// Multi-arch extra buildpacks (--buildpack / project.toml): each is a multi-arch
+	// registry image (pack verified it supports platform p). We pull its PER-PLATFORM
+	// child image (extraBuildpackRefs are already pinned to the p-arch child digest by the
+	// caller) and COPY its /cnb/buildpacks over the builder's before detect. This adds new
+	// modules and OVERRIDES same-id/version ones, and — crucially — gives EACH
+	// architecture its OWN arch-matching buildpack binaries (PLATFORM-1662 FR-8b), unlike
+	// staging a single host-arch tree onto every leg. Copying (vs mounting) is
+	// intentional: the modules must persist through the detect/build RUNs. These only
+	// mutate the transient builder state; the final image is assembled FROM the run image.
+	for i, bpRef := range extraBuildpackRefs {
+		bpSrc := llb.Image(bpRef, llb.Platform(p))
 		base = base.File(
 			// CopyDirContentsOnly is REQUIRED: /cnb/buildpacks already exists in the
-			// builder, and BuildKit's Copy otherwise nests the source dir UNDER the
-			// destination (yielding /cnb/buildpacks/buildpacks/...). Copying contents
-			// merges the staged {id}/{version}/* trees INTO the builder's existing
-			// /cnb/buildpacks so the order.toml references resolve.
+			// builder; copying CONTENTS merges the buildpack image's {id}/{version}/*
+			// trees INTO the builder's existing /cnb/buildpacks (not nested under it) so
+			// the order.toml references resolve.
 			llb.Copy(bpSrc, "/cnb/buildpacks", "/cnb/buildpacks", &llb.CopyInfo{
 				CreateDestPath:      true,
 				AllowWildcard:       true,
 				AllowEmptyWildcard:  true,
 				CopyDirContentsOnly: true,
 			}),
-			llb.WithCustomNamef("[%s] add user buildpacks", plat),
+			llb.WithCustomNamef("[%s] add user buildpack %d/%d", plat, i+1, len(extraBuildpackRefs)),
 		)
 	}
+
+	// CNB image extensions (spec buildkit-extension-support): stage extension modules
+	// onto /cnb/extensions the SAME way buildpacks are staged above — platform-agnostic
+	// extensions from a single local, multi-arch extensions as their per-platform child.
+	// A no-op when the build has no extensions (AC-5): the graph stays byte-for-byte the
+	// current 5-phase sequence.
+	base = stageExtensionsLLB(base, in, p, plat, extraExtensionRefs)
 
 	// Write the user-supplied build-time env vars as files under /platform/env/<NAME>
 	// (CNB platform contract). The lifecycle build phase reads these and exposes them
@@ -535,12 +816,25 @@ func buildEmitLLB(in nativeBuildInputs, p ocispecs.Platform) llb.State {
 			keys = append(keys, k)
 		}
 		sort.Strings(keys)
+		// Chain every env-file write into a SINGLE FileAction so the whole thing is
+		// ONE progress vertex ("[plat] write platform env (N vars)") instead of one
+		// vertex per variable. A CI caller passing a large env-file (e.g. Jenkins
+		// forwarding its whole environment) would otherwise flood the progress output
+		// with dozens of vertices per platform and bury the lifecycle steps. Keys are
+		// sorted first so the chained op is deterministic and LLB stays cache-stable.
+		var envAction *llb.FileAction
 		for _, k := range keys {
-			base = base.File(
-				llb.Mkfile(path.Join("/platform/env", k), 0644, []byte(in.buildEnv[k])),
-				llb.WithCustomNamef("[%s] platform env: %s", plat, k),
-			)
+			p := path.Join("/platform/env", k)
+			if envAction == nil {
+				envAction = llb.Mkfile(p, 0644, []byte(in.buildEnv[k]))
+			} else {
+				envAction = envAction.Mkfile(p, 0644, []byte(in.buildEnv[k]))
+			}
 		}
+		base = base.File(
+			envAction,
+			llb.WithCustomNamef("[%s] write platform env (%d vars)", plat, len(keys)),
+		)
 	}
 
 	appSrc := llb.Local(contextLocalName)
@@ -638,20 +932,65 @@ func buildEmitLLB(in nativeBuildInputs, p ocispecs.Platform) llb.State {
 	analyzerArgs = append(analyzerArgs, "-run-image", in.runImage, "-layers", "/layers", in.imageName)
 	base = base.Run(append([]llb.RunOption{llb.Args(analyzerArgs), llb.WithCustomNamef("[%s] lifecycle: analyzer", plat), cacheMount}, env...)...).Root()
 
-	detectorOpts := append([]llb.RunOption{llb.Args([]string{"/cnb/lifecycle/detector", "-app", in.workspace, "-layers", "/layers"}), llb.WithCustomNamef("[%s] lifecycle: detector", plat)}, env...)
+	// CNB image extensions: GENERATION happens INSIDE the detector phase, not via a
+	// standalone generator binary — the bundled lifecycle image has no /cnb/lifecycle/generator
+	// (only analyzer/builder/creator/detector/exporter/extender/rebaser/restorer symlinks).
+	// The detector, given -generated, runs bin/generate for the participating extensions and
+	// writes the generated build.Dockerfile / run.Dockerfile to generatedDirNBF
+	// (/layers/generated), which persists in the solved state for the later read. This mirrors
+	// the daemon Detect() (internal/build/lifecycle_execution.go), which runs the detector and
+	// then CopyOutToMaybe(<layers>/generated) — there is NO separate generator invocation.
+	// Guarded on extensionsEnabled(in) (order has extensions AND platform API >= 0.13) so a
+	// no-extension build's detector args are byte-for-byte the previous "-app <ws> -layers
+	// /layers" with no -generated (AC-5).
+	detectorArgs := []string{"/cnb/lifecycle/detector", "-app", in.workspace, "-layers", "/layers"}
+	if extensionsEnabled(in) {
+		detectorArgs = append(detectorArgs, "-generated", generatedDirNBF)
+	}
+	detectorOpts := append([]llb.RunOption{llb.Args(detectorArgs), llb.WithCustomNamef("[%s] lifecycle: detector", plat)}, env...)
 	detectorOpts = append(detectorOpts, bindingMounts...)
 	base = base.Run(detectorOpts...).Root()
 
-	restorerArgs := append([]string{"/cnb/lifecycle/restorer"}, skipChown...)
-	restorerArgs = append(restorerArgs, "-layers", "/layers")
-	base = base.Run(append([]llb.RunOption{llb.Args(restorerArgs), llb.WithCustomNamef("[%s] lifecycle: restorer", plat), cacheMount}, env...)...).Root()
+	return base, emitPhaseParams{
+		env:           env,
+		skipChown:     skipChown,
+		insecure:      insecure,
+		bindingMounts: bindingMounts,
+		cacheMount:    cacheMount,
+	}
+}
 
-	builderOpts := append([]llb.RunOption{llb.Args([]string{"/cnb/lifecycle/builder", "-app", in.workspace, "-layers", "/layers"}), llb.WithCustomNamef("[%s] lifecycle: builder", plat)}, env...)
-	builderOpts = append(builderOpts, bindingMounts...)
+// buildEmitSuffixLLB appends the restorer → builder → exporter(emit-mode) phases to a
+// builder state, using the shared phase params from the prefix. The builder state it runs
+// on is the caller's choice: the no-extension path (buildEmitLLB) passes the prefix state
+// straight through, while the extension path (nativeBuildPlatform) passes the
+// extend-build-modified builder state so the `builder` phase runs ON the extended build
+// image (FR-3). The phase vertices are identical regardless, so BuildKit cache-hits the
+// unchanged tail across solves (design.md "Multi-solve execution model").
+func buildEmitSuffixLLB(base llb.State, in nativeBuildInputs, plat string, pp emitPhaseParams) llb.State {
+	// CNB image extensions (spec buildkit-extension-support, FR-4): when the detector's
+	// generator wrote /layers/analyzed.toml with [run-image].extend = true (it does so for a
+	// run.Dockerfile PATCH), the bundled lifecycle RESTORER would try to pull the run image
+	// into /kaniko and fail (mkdir /kaniko: permission denied under -skip-chown -uid/-gid).
+	// The buildkit path does NOT need that: the run.Dockerfile is applied in LLB at run-image
+	// assembly (extendRunImageLLB). So reset the marker to false here — AFTER the detector
+	// wrote analyzed.toml, BEFORE the restorer runs — to skip the restorer's kaniko branch.
+	// Guarded on extensionsEnabled(in) so the no-extension detector→restorer graph is
+	// byte-for-byte unchanged (AC-5).
+	if extensionsEnabled(in) {
+		base = resetRunImageExtendLLB(base, in.uid, in.gid, plat)
+	}
+
+	restorerArgs := append([]string{"/cnb/lifecycle/restorer"}, pp.skipChown...)
+	restorerArgs = append(restorerArgs, "-layers", "/layers")
+	base = base.Run(append([]llb.RunOption{llb.Args(restorerArgs), llb.WithCustomNamef("[%s] lifecycle: restorer", plat), pp.cacheMount}, pp.env...)...).Root()
+
+	builderOpts := append([]llb.RunOption{llb.Args([]string{"/cnb/lifecycle/builder", "-app", in.workspace, "-layers", "/layers"}), llb.WithCustomNamef("[%s] lifecycle: builder", plat)}, pp.env...)
+	builderOpts = append(builderOpts, pp.bindingMounts...)
 	base = base.Run(builderOpts...).Root()
 
-	exporterArgs := append([]string{"/cnb/lifecycle/exporter"}, skipChown...)
-	exporterArgs = append(exporterArgs, insecure...)
+	exporterArgs := append([]string{"/cnb/lifecycle/exporter"}, pp.skipChown...)
+	exporterArgs = append(exporterArgs, pp.insecure...)
 	if in.defaultProcessType != "" {
 		exporterArgs = append(exporterArgs, "-process-type", in.defaultProcessType)
 	}
@@ -665,7 +1004,7 @@ func buildEmitLLB(in nativeBuildInputs, p ocispecs.Platform) llb.State {
 	// exporterImageAttrs + finalize. Passing them keeps the exporter's report/plan
 	// consistent with the daemon path.
 	exporterArgs = append(exporterArgs, in.additionalTags...)
-	base = base.Run(append([]llb.RunOption{llb.Args(exporterArgs), llb.WithCustomNamef("[%s] lifecycle: exporter (emit-mode)", plat), cacheMount}, env...)...).Root()
+	base = base.Run(append([]llb.RunOption{llb.Args(exporterArgs), llb.WithCustomNamef("[%s] lifecycle: exporter (emit-mode)", plat), pp.cacheMount}, pp.env...)...).Root()
 
 	return base
 }
