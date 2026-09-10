@@ -194,6 +194,9 @@ func (b *BuildkitBackend) driveNative(ctx context.Context, bkClient *client.Clie
 		execEnv:              opts.ExecutionEnv,
 		extraBuildpackImages: opts.ExtraBuildpackImages,
 		hasAgnosticBuildpacks: opts.ExtraBuildpacksDir != "",
+		hasExtensions:         opts.HasExtensions,
+		extraExtensionImages:  opts.ExtraExtensionImages,
+		hasAgnosticExtensions: opts.ExtraExtensionsDir != "",
 	}
 	if reg := registryHost(opts.ImageName); reg != "" && isLikelyInsecureRegistry(reg) {
 		in.insecureRegistries = []string{reg}
@@ -224,6 +227,17 @@ func (b *BuildkitBackend) driveNative(ctx context.Context, bkClient *client.Clie
 			return nil, fmt.Errorf("creating local FS for agnostic extra buildpacks dir %s: %w", opts.ExtraBuildpacksDir, ferr)
 		}
 		localMounts[extraBuildpacksLocalName] = bpFS
+	}
+	// Multi-arch extensions are pulled per-platform as registry images directly in LLB
+	// (see stageExtensionsLLB) — no host-side local mount. PLATFORM-AGNOSTIC extensions
+	// (inline/local/single-manifest) are staged host-side and synced in as one local,
+	// copied to every leg's /cnb/extensions.
+	if opts.ExtraExtensionsDir != "" {
+		exFS, ferr := fsutil.NewFS(opts.ExtraExtensionsDir)
+		if ferr != nil {
+			return nil, fmt.Errorf("creating local FS for agnostic extensions dir %s: %w", opts.ExtraExtensionsDir, ferr)
+		}
+		localMounts[extensionsLocalName] = exFS
 	}
 
 	solveOpt := client.SolveOpt{

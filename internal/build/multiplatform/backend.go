@@ -197,6 +197,31 @@ type PlatformBuildOpts struct {
 	// assembled FROM the run image, so they never leak into the output.
 	ExtraBuildpacksDir string
 
+	// ExtraExtensionImages are the registry image references of user-supplied image
+	// extensions that are MULTI-ARCH images. Each supports every requested platform
+	// (pack verifies this). For each platform leg the backend pulls the extension's
+	// PER-PLATFORM child image directly in LLB and COPYs its /cnb/extensions over the
+	// builder's, so each arch gets its OWN arch-matching extension binaries
+	// (PLATFORM-1662 FR-8b). Empty when none were requested.
+	ExtraExtensionImages []string
+
+	// ExtraExtensionsDir is a host directory (staged by pack) laid out as
+	// /cnb/extensions/{id}/{version}/* containing the PLATFORM-AGNOSTIC extensions
+	// (inline, local dir/tarball, single-manifest images). When set, the backend syncs
+	// it in as an llb.Local and COPYs it over the builder's /cnb/extensions on EVERY
+	// platform leg (same arch-neutral content for all). Empty when there are no agnostic
+	// extensions. Both ExtraExtensionImages (per-arch) and ExtraExtensionsDir (agnostic)
+	// can be set together.
+	//
+	// These modules only exist in the transient builder state; the final image is
+	// assembled FROM the run image, so they never leak into the output.
+	ExtraExtensionsDir string
+
+	// HasExtensions indicates the resolved order contains one or more image extensions.
+	// When true (and the platform API supports it), the backend runs the generator phase
+	// and applies the generated run/build Dockerfiles in LLB.
+	HasExtensions bool
+
 	// OrderToml is the custom order.toml content to write into the builder.
 	// When additional buildpacks are specified, this defines the detection order.
 	// If empty, the builder's default order is used.

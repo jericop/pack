@@ -607,13 +607,16 @@ func (c *Client) Build(ctx context.Context, opts BuildOptions) error {
 	// On the buildkit backend the synthesized ephemeral builder IMAGE is never
 	// consumed (the backend builds FROM the base builder and injects the added
 	// buildpacks over /cnb/buildpacks + the resolved /cnb/order.toml over LLB), so
-	// the daemon image save is pure overhead. Skip it — EXCEPT when the build adds
-	// EXTENSIONS: the buildkit backend does not yet inject /cnb/extensions or drive
-	// the Dockerfile-extension flow over LLB, so those still need the daemon-
-	// synthesized builder. Fall back to the daemon save in that case.
-	// See spec .kiro/specs/buildkit-ephemeral-builder-in-llb.
+	// the daemon image save is pure overhead. This now holds for EXTENSIONS too: the
+	// buildkit backend stages /cnb/extensions per-arch, runs the generator, and
+	// applies build.Dockerfile (extend-build) + run.Dockerfile (extend-run) natively
+	// in LLB (spec .kiro/specs/buildkit-extension-support), so an extensions build no
+	// longer needs the daemon-synthesized builder either. Skip the save for the
+	// buildkit backend unconditionally. The populated builder OBJECT is still
+	// returned (order/extensions/env), so downstream reads work; only the daemon
+	// image is skipped. See spec .kiro/specs/buildkit-ephemeral-builder-in-llb.
 	isBuildkitBackend := multiplatform.BackendType(opts.BuildBackend).Resolve() == multiplatform.BackendBuildkit
-	skipEphemeralBuilderSave := isBuildkitBackend && !hasExtensions
+	skipEphemeralBuilderSave := isBuildkitBackend
 	ephemeralBuilder, err := c.createEphemeralBuilder(
 		rawBuilderImage,
 		buildEnvs,
@@ -938,7 +941,20 @@ func (c *Client) Build(ctx context.Context, opts BuildOptions) error {
 			return err
 		}
 		defer cleanupAgnosticBPs()
-		return c.buildMultiPlatform(ctx, opts, lifecycleOpts, appPath, runImageName, extraBPImages, agnosticBPDir, order, orderExtensions)
+		// Image extensions (--extension) are classified the SAME way as buildpacks for
+		// the buildkit backend (spec buildkit-extension-support): MULTI-ARCH images are
+		// pulled per-platform child in LLB; agnostic ones (inline/local/single-manifest)
+		// are staged once and copied to every leg's /cnb/extensions (PLATFORM-1662 FR-8b).
+		extraExImages, err := c.collectBuildkitPerArchExtensionImages(opts, opts.Platforms)
+		if err != nil {
+			return err
+		}
+		agnosticExDir, cleanupAgnosticExs, err := stageAgnosticExtensions(fetchedExs)
+		if err != nil {
+			return err
+		}
+		defer cleanupAgnosticExs()
+		return c.buildMultiPlatform(ctx, opts, lifecycleOpts, appPath, runImageName, extraBPImages, agnosticBPDir, extraExImages, agnosticExDir, hasExtensions, order, orderExtensions, bldr.Order())
 	}
 
 	// docker-daemon backend: standard container-based build against the daemon.
@@ -952,7 +968,7 @@ func (c *Client) Build(ctx context.Context, opts BuildOptions) error {
 // buildMultiPlatform handles the multi-platform build path using BuildKit.
 // It constructs lifecycle phase commands, selects the appropriate backend,
 // and dispatches the build to the multi-platform executor.
-func (c *Client) buildMultiPlatform(ctx context.Context, opts BuildOptions, lifecycleOpts build.LifecycleOptions, appPath string, runImageName string, extraBuildpackImages []string, agnosticBuildpacksDir string, order dist.Order, orderExtensions dist.Order) error {
+func (c *Client) buildMultiPlatform(ctx context.Context, opts BuildOptions, lifecycleOpts build.LifecycleOptions, appPath string, runImageName string, extraBuildpackImages []string, agnosticBuildpacksDir string, extraExtensionImages []string, agnosticExtensionsDir string, hasExtensions bool, order dist.Order, orderExtensions dist.Order, builderOrder dist.Order) error {
 	platforms, err := multiplatform.ParsePlatformList(opts.Platforms)
 	if err != nil {
 		return fmt.Errorf("parsing platforms: %w", err)
@@ -970,14 +986,42 @@ func (c *Client) buildMultiPlatform(ctx context.Context, opts BuildOptions, life
 	// order label. This guarantees the buildkit detection order matches the daemon's
 	// and keeps a single source of truth for both the ordering decision and its
 	// serialization.
+	//
+	// Extensions add a second requirement: the buildkit detector must be handed an
+	// order.toml that includes [[order-extensions]] whenever there are extensions —
+	// otherwise it falls back to the builder's baked-in /cnb/order.toml (which has no
+	// [[order-extensions]]), the extensions never participate in detection, and the
+	// generate/extend phases become no-ops. But when there are extensions and NO extra
+	// buildpacks, the resolved `order` is a single empty group (dist.Order{{Group: {}}}),
+	// so serializing it as-is would emit an empty [[order]]. In that case we serialize
+	// the BUILDER'S DEFAULT order for [[order]] (threaded in as builderOrder — the base
+	// builder's bldr.Order() from Build()) alongside the resolved [[order-extensions]],
+	// so normal buildpack detection still runs AND the extensions participate.
+	extensionsPresent := hasExtensions || (len(orderExtensions) > 0 && len(orderExtensions[0].Group) > 0)
 	var orderToml string
-	if len(order) > 0 && len(order[0].Group) > 0 {
+	switch {
+	case len(order) > 0 && len(order[0].Group) > 0:
+		// Extra buildpacks (--buildpack / pre / post) changed the buildpack order: use it.
 		orderToml, err = builder.OrderTOML(order, orderExtensions)
 		if err != nil {
 			return fmt.Errorf("serializing buildpack order: %w", err)
 		}
 		c.logger.Debugf("Injecting resolved buildpack order into the buildkit builder")
+	case extensionsPresent:
+		// Extensions but no extra buildpacks: serialize the builder's DEFAULT buildpack
+		// order for [[order]] plus the resolved [[order-extensions]], so the extensions
+		// participate in detection while normal buildpack groups still run. builderOrder
+		// is the base builder's order (bldr.Order() from Build()); orderExtensions is the
+		// resolved extension order (the ephemeral builder was populated with it via
+		// SetOrderExtensions, so it matches lifecycleOpts.Builder.OrderExtensions()).
+		orderToml, err = builder.OrderTOML(builderOrder, orderExtensions)
+		if err != nil {
+			return fmt.Errorf("serializing buildpack order: %w", err)
+		}
+		c.logger.Debugf("Injecting builder default order + resolved order-extensions into the buildkit builder")
 	}
+	// else: no extra buildpacks AND no extensions — orderToml stays "" so no order.toml
+	// is written and the graph is the byte-for-byte 5-phase sequence (AC-5).
 
 	// Construct the lifecycle phase commands from the lifecycle options
 	phases := buildLifecyclePhases(lifecycleOpts, runImageName, c.logger.IsVerbose())
@@ -1048,6 +1092,9 @@ func (c *Client) buildMultiPlatform(ctx context.Context, opts BuildOptions, life
 		Network:            opts.ContainerConfig.Network,
 		ExtraBuildpackImages: extraBuildpackImages,
 		ExtraBuildpacksDir:   agnosticBuildpacksDir,
+		ExtraExtensionImages: extraExtensionImages,
+		ExtraExtensionsDir:   agnosticExtensionsDir,
+		HasExtensions:        hasExtensions,
 		OrderToml:            orderToml,
 		ClearCache:         opts.ClearCache,
 		RegistryAuth:       buildRegistryAuth(c.keychain, lifecycleOpts),
@@ -1492,6 +1539,56 @@ func stageAgnosticExtraBuildpacks(fetchedBPs []buildpack.BuildModule) (string, f
 	for _, bp := range fetchedBPs {
 		if moduleIsPlatformAgnostic(bp) {
 			agnostic = append(agnostic, bp)
+		}
+	}
+	return stageExtraBuildpacks(agnostic)
+}
+
+// collectBuildkitPerArchExtensionImages is the extension analog of
+// collectBuildkitPerArchBuildpackImages (spec buildkit-extension-support): it identifies
+// which extra extensions (--extension) are MULTI-ARCH registry images so the backend can
+// pull each extension's PER-PLATFORM child image in LLB (arch-correct binaries per leg,
+// PLATFORM-1662 FR-8b). Every other kind (local dir/tarball, single-manifest image) is
+// platform-agnostic and staged once by stageAgnosticExtensions. Extensions have no
+// project.toml counterpart, so the declared refs come solely from opts.Extensions (the
+// same source processExtensions uses). Reuses verifyBuildpackImageSupportsPlatforms, which
+// is module-kind-agnostic. Does NOT touch the single-arch daemon fetch path.
+func (c *Client) collectBuildkitPerArchExtensionImages(opts BuildOptions, platforms []string) ([]string, error) {
+	var perArchImages []string
+	for _, ex := range opts.Extensions {
+		locatorType, err := buildpack.GetLocatorType(ex, opts.RelativeBaseDir, []dist.ModuleInfo{})
+		if err != nil {
+			return nil, err
+		}
+		if locatorType != buildpack.PackageLocator {
+			// Not a registry image (local/id locators) -> platform-agnostic or no content.
+			continue
+		}
+		img := buildpack.ParsePackageLocator(ex)
+		isIndex, err := c.verifyBuildpackImageSupportsPlatforms(img, platforms)
+		if err != nil {
+			return nil, err
+		}
+		if isIndex {
+			perArchImages = append(perArchImages, img)
+		}
+		// A single-manifest image is treated as platform-agnostic (staged, copied to all legs).
+	}
+	return perArchImages, nil
+}
+
+// stageAgnosticExtensions is the extension analog of stageAgnosticExtraBuildpacks: it
+// stages the PLATFORM-AGNOSTIC extensions (everything except the multi-arch registry
+// images handled per-arch) into a single dir laid out as /cnb/extensions/{id}/{version}/*,
+// to be copied to EVERY platform leg. Selection reuses moduleIsPlatformAgnostic and the
+// staging reuses stageExtraBuildpacks — both operate on any buildpack.BuildModule, and an
+// extension module's tar self-roots at /cnb/extensions, so no extension-specific staging
+// is needed. Returns the staging dir ("" if none) and a cleanup func.
+func stageAgnosticExtensions(fetchedExs []buildpack.BuildModule) (string, func(), error) {
+	var agnostic []buildpack.BuildModule
+	for _, ex := range fetchedExs {
+		if moduleIsPlatformAgnostic(ex) {
+			agnostic = append(agnostic, ex)
 		}
 	}
 	return stageExtraBuildpacks(agnostic)
@@ -2438,9 +2535,11 @@ func (c *Client) createEphemeralBuilder(
 	// (UID/GID, stack/distro labels, platform API, order/extensions) work exactly as
 	// before — but we DO NOT call Save (no daemon image). We also name it after the
 	// base builder so the caller's cleanup ImageRemove no-ops.
-	// The caller only sets skipSave for the buildkit backend AND when the build adds
-	// no extensions (the buildkit backend does not yet inject /cnb/extensions, so an
-	// extensions build still needs the daemon-synthesized builder).
+	// The caller sets skipSave for the buildkit backend regardless of extensions:
+	// the buildkit backend now drives the extension flow over LLB too (stages
+	// /cnb/extensions per-arch, runs the generator, applies build.Dockerfile +
+	// run.Dockerfile natively), so an extensions build no longer needs the daemon-
+	// synthesized builder either (spec .kiro/specs/buildkit-extension-support).
 	// See spec .kiro/specs/buildkit-ephemeral-builder-in-llb.
 	builderName := fmt.Sprintf("pack.local/builder/%x:latest", randString(10))
 	if skipSave {
